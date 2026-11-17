@@ -69,6 +69,12 @@ Referenz: Median (Standard), Durchschnitt, Minimum der angehakten Angebote, `car
 
 Gegenprobe (Test): englisch NM → deutsch LP = 0,45 × 0,63 = 0,2835. Rendite bei 70 % = 42,9 %.
 
+## Kombinierter Marktwert
+
+Standard-Ausgangspreis ist der Median aller verfügbaren Quellen (EUR, Basis Near Mint): Cardmarket Trend und Ø 30 Tage (TCGdex), TCGplayer Near Mint (Pokemon Price Tracker, aktuell; sonst TCGdex), Median deiner Cardmarket-Angebote, Median deiner eingetragenen eBay-Verkäufe. Mit API-Schlüssel lädt die App beim Öffnen einer Karte automatisch (3 Credits: Zustandspreise + Graded-Preise, 24 h Cache). Ungegradete eBay-Verkäufe liefert keine Schnittstelle mehr; Cardmarket über Pokemon Price Tracker nur im Bezahltarif.
+
+Zustandsabschlag: Gibt es echte TCGplayer-Zustandspreise (Near Mint, Lightly/Moderately/Heavily Played, Damaged), wird das Verhältnis zu Near Mint dieser Karte genutzt (Zuordnung MT/NM→NM, EX→LP, GD/LP→MP, PL→HP, PO→Damaged), sonst die eigenen Faktoren (umschaltbar unter Optionen). Beispiel Glurak-ex 151: Faktor LP 0,45 ergab 3,42 €, echte Marktdaten 0,82 → 6,20 € (TCGplayer real 6,14 €).
+
 ## Preis je Zustand
 
 TCGdex/Cardmarket-Preisindex hat **keine** getrennten Preise pro Zustand. Die Bewertung zeigt deshalb eine Tabelle MT … PO, abgeleitet aus der Referenz über `CF[Zustand] / CF[Referenzzustand]` × Sprachfaktor, mit Marktwert, Netto und Max. Gebot 80 %. Echte Angebote eines bestimmten Zustands (Cardmarket-Filter „Zustand“) trägst du unter „Angebote“ ein und stellst „Zustand der Referenz“ entsprechend ein.

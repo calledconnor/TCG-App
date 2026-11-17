@@ -3,7 +3,7 @@
 //   /api/graded        Graded-Preise (Pokemon Price Tracker, Schlüssel per Secret PPT_API_KEY oder Header X-PPT-Key), 24 h gecacht
 //   /api/tcgdex/...    GET-Proxy zu https://api.tcgdex.net/v2/... (Fallback, falls der Browser TCGdex blockt), 24 h gecacht
 // Alles andere: statische Dateien (env.ASSETS).
-const JSON_HDR = { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'X-PPT-Key, Content-Type' };
+const JSON_HDR = { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'X-PPT-Key, Content-Type', 'Access-Control-Expose-Headers': 'X-Credits-Remaining, X-API-Calls-Consumed' };
 
 async function cached(ctx, key, ttl, produce) {
   const cache = caches.default;
@@ -49,14 +49,14 @@ export default {
         } else {
           const id = url.searchParams.get('tcgPlayerId');
           const q = url.searchParams.get('q');
-          if (id && /^\d+$/.test(id)) target = `https://www.pokemonpricetracker.com/api/v2/cards?tcgPlayerId=${id}&includeEbay=true`;
-          else if (q) target = `https://www.pokemonpricetracker.com/api/v2/cards?search=${encodeURIComponent(q.slice(0, 100))}&limit=1&includeEbay=true`;
+          if (id && /^\d+$/.test(id)) target = `https://www.pokemonpricetracker.com/api/v2/cards?tcgPlayerId=${id}&includeBoth=true&days=3`;
+          else if (q) target = `https://www.pokemonpricetracker.com/api/v2/cards?search=${encodeURIComponent(q.slice(0, 100))}&limit=1&includeBoth=true&days=3`;
           else return new Response(JSON.stringify({ error: 'missing_param' }), { status: 400, headers: JSON_HDR });
         }
         const run = async () => {
           const r = await fetch(target, { headers: { Authorization: 'Bearer ' + key, Accept: 'application/json' } });
           const body = await r.text();
-          return new Response(body, { status: r.status, headers: { ...JSON_HDR, 'X-API-Calls-Consumed': r.headers.get('x-api-calls-consumed') || '' } });
+          return new Response(body, { status: r.status, headers: { ...JSON_HDR, 'X-API-Calls-Consumed': r.headers.get('x-api-calls-consumed') || '', 'X-Credits-Remaining': r.headers.get('x-ratelimit-daily-remaining') || '' } });
         };
         // Preise sind öffentlich: Cache je Ziel-URL (nicht je Schlüssel), Test nie cachen
         if (url.pathname === '/api/graded-test') {

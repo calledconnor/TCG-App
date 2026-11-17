@@ -317,6 +317,8 @@ export async function gradedPrices({ tcgIds = [], query = '', apiKey = '', force
     const card = Array.isArray(body.data) ? body.data[0] : body.data;
     if (!card) return { status: 'not_found' };
     const data = normalizeGraded(card);
+    const rem = res.headers.get('x-credits-remaining');
+    if (rem) data.creditsRemaining = +rem;
     db.put('cache', { url: key, data, status: 200, fetchedAt: Date.now() }).catch(() => {});
     return { status: 'ok', data, fetchedAt: Date.now() };
   } catch (e) {
@@ -355,5 +357,17 @@ export function normalizeGraded(card) {
     rawMarketUsd: num(card.prices?.market), rawUpdated: card.prices?.lastUpdated ?? null,
     grades, totalSales: eb.totalSales ?? null, from: eb.dateRangeStart ?? null, to: eb.dateRangeEnd ?? null,
     url: card.tcgPlayerUrl ?? null,
+    // echte TCGplayer-Preise je Zustand (USD) der Hauptvariante
+    printing: card.prices?.primaryPrinting ?? null,
+    conditions: (() => {
+      const pv = card.prices?.variants?.[card.prices?.primaryPrinting] || {};
+      const hc = card.priceHistory?.conditions || {};
+      const out = {};
+      for (const name of ['Near Mint', 'Lightly Played', 'Moderately Played', 'Heavily Played', 'Damaged']) {
+        const v = num(pv[name]?.price) ?? num(hc[name]?.latestPrice);
+        if (v != null) out[name] = { usd: v, date: pv[name]?.lastUpdated || hc[name]?.latestDate || null };
+      }
+      return out;
+    })(),
   };
 }

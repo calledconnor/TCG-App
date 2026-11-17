@@ -96,3 +96,10 @@ test('parseCardNumberLoose: Schrägstrich als 7 gelesen', async () => {
   assert.equal(parseCardNumberLoose('0067165', null), null);
   assert.equal(parseCardNumberLoose('1234567', ok), null);
 });
+
+test('combine: Median der Quellen', async () => {
+  const { combine } = await import('../js/calc.js');
+  assert.equal(combine([{ eur: 7.6 }, { eur: 8.01 }, { eur: 7.2 }]), 7.6);
+  assert.equal(combine([{ eur: 10 }, { eur: 20 }]), 15);
+  assert.equal(combine([]), null);
+});

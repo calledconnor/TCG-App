@@ -1,6 +1,6 @@
 import {
   DEFAULT_SETTINGS, CONDITION_LABELS, CONDITION_DE, LANG_LABELS, LADDER,
-  stats, evaluate, marktwert, parsePrices, parseCardNumber, parseCardNumberLoose, preiseJeZustand,
+  stats, evaluate, marktwert, parsePrices, parseCardNumber, parseCardNumberLoose, preiseJeZustand, combine, CM_TO_TCG,
 } from './calc.js';
 import {
   ALL_LANGS, setApiBase, probeLanguages, searchByName, searchByNumber,
@@ -485,8 +485,56 @@ async function openCard(lang, id) {
   }
 }
 
+/**
+ * Zustandsfaktoren: aus echten TCGplayer-Preisen dieser Karte (Verhältnis zu Near Mint), wenn vorhanden
+ * und in den Optionen aktiviert; sonst die eigenen Faktoren. MT bleibt immer beim eigenen Faktor.
+ */
+function effectiveCF(ppt) {
+  const conds = ppt?.conditions;
+  const nm = conds?.['Near Mint']?.usd;
+  if (settings.cfFromMarket === false || !nm) return { cf: settings.cf, fromMarket: false };
+  const cf = { ...settings.cf };
+  let used = 0;
+  for (const c of Object.keys(cf)) {
+    if (c === 'MT' || c === 'NM') continue;
+    const v = conds[CM_TO_TCG[c]]?.usd;
+    if (v != null) { cf[c] = settings.cf.NM * Math.min(1, v / nm); used++; }
+  }
+  return used ? { cf, fromMarket: true } : { cf: settings.cf, fromMarket: false };
+}
+
+/**
+ * Marktquellen für den kombinierten Wert (alle in EUR, Basis Near Mint):
+ * Cardmarket Trend + Ø 30 Tage (TCGdex), TCGplayer Near Mint (Pokemon Price Tracker, sonst TCGdex),
+ * Median deiner Cardmarket-Angebote und deiner eBay-Beobachtungen.
+ */
+function marketSources(pricing, ppt, offers = [], useHolo = false) {
+  const out = [];
+  const cm = pricing?.cardmarket;
+  if (cm) {
+    const f = (k) => (useHolo ? k + '-holo' : k);
+    if (cm[f('trend')] != null) out.push({ key: 'cm-trend', label: cmLabel(f('trend')), eur: cm[f('trend')], date: cm.updated });
+    if (cm[f('avg30')] != null) out.push({ key: 'cm-avg30', label: cmLabel(f('avg30')), eur: cm[f('avg30')], date: cm.updated });
+  }
+  if (fx) {
+    const nm = ppt?.conditions?.['Near Mint'];
+    if (nm) out.push({ key: 'tcg-nm', label: 'TCGplayer Near Mint (aktuell)', eur: nm.usd * fx.rate, date: nm.date || ppt.rawUpdated });
+    else {
+      const m = tpMarket(pricing || {});
+      if (m) out.push({ key: 'tcg', label: `TCGplayer Marktpreis ${tpVariant(m.variant)}`, eur: m.usd * fx.rate, date: m.updated });
+    }
+  }
+  const on = offers.filter((o) => o.on);
+  const cmo = stats(on.filter((o) => o.src === 'cm').map((o) => o.v));
+  if (cmo.count) out.push({ key: 'off-cm', label: `Deine ${cmo.count} Cardmarket-Angebote (Median)`, eur: cmo.median, date: Date.now() });
+  const ebo = stats(on.filter((o) => o.src === 'ebay').map((o) => o.v));
+  if (ebo.count) out.push({ key: 'off-ebay', label: `Deine ${ebo.count} eBay-Verkäufe (Median)`, eur: ebo.median, date: Date.now() });
+  return out;
+}
+
 /** Sinnvolle Standard-Referenz: Angebote > cardmarket.trend > cardmarket.avg30 > TCGplayer market. */
 function autoRef(pricing, offers) {
+  if (marketSources(pricing, null, offers).length >= 2) return 'kombi';
   if (offers && offers.some((o) => o.on)) return 'median';
   const cm = pricing.cardmarket;
   if (cm && cm.trend != null) return 'trend';
@@ -506,6 +554,7 @@ function tpMarket(pricing) {
 }
 
 const REF_OPTIONS = [
+  ['kombi', 'Kombinierter Marktwert (alle Quellen)'],
   ['median', 'Median der Angebote'],
   ['mean', 'Durchschnitt der Angebote'],
   ['min', 'Minimum der Angebote'],
@@ -656,7 +705,7 @@ function renderEval() {
   const addOffers = (vals) => {
     const src = $('#offer-src').value;
     for (const v of vals) cur.offers.push({ id: uid(), v, on: true, src });
-    if (cur.refAuto && cur.refType !== 'median') {
+    if (cur.refAuto && cur.refType !== 'median' && cur.refType !== 'kombi') {
       cur.refType = 'median';
       $('#ref-type').value = 'median';
     }
@@ -719,17 +768,32 @@ async function loadGradedApi(fetchNow) {
   if (!el || !cur) return;
   const cardId = cur.card.id;
   const query = `${cur.enName?.name || cur.card.name} ${cur.card.localId}${cur.card.set?.cardCount?.official ? '/' + cur.card.set.cardCount.official : ''}`;
-  if (!fetchNow) {
+  const auto = !fetchNow && settings.pptKey && settings.pptAuto !== false;
+  if (!fetchNow && !auto) {
     // nur Cache prüfen, keine Credits
     const r = await gradedPrices({ tcgIds: cur.pricing.tcgIds, query, apiKey: '', force: false, cacheOnly: true });
     if (cur.card.id !== cardId) return;
     cur.gradedApi = r.status === 'ok' ? r : null;
-    return renderGradedApi();
+    return afterPpt();
   }
-  el.innerHTML = '<p class="status">Lade Graded-Preise …</p>';
-  const r = await gradedPrices({ tcgIds: cur.pricing.tcgIds, query, apiKey: settings.pptKey, force: true });
+  el.innerHTML = '<p class="status">Lade aktuelle Marktdaten …</p>';
+  const mk = $('#ppt-status');
+  if (mk) mk.textContent = 'Lade aktuelle TCGplayer- und Graded-Preise …';
+  // automatisch: Cache nutzen, wenn jünger als 24 h; Knopf: immer frisch
+  const r = await gradedPrices({ tcgIds: cur.pricing.tcgIds, query, apiKey: settings.pptKey, force: !!fetchNow });
   if (cur.card.id !== cardId) return;
   cur.gradedApi = r;
+  if (r.status === 'ok' && r.data.creditsRemaining != null) settings.pptRemaining = { n: r.data.creditsRemaining, at: Date.now() };
+  afterPpt();
+}
+function afterPpt() {
+  if (cur.refAuto && cur.refType !== 'kombi' && marketSources(cur.pricing, cur.gradedApi?.data, cur.offers).length >= 2) {
+    cur.refType = 'kombi';
+    const sel = $('#ref-type');
+    if (sel) sel.value = 'kombi';
+  }
+  renderMarket();
+  updateCalc();
   renderGradedApi();
 }
 
@@ -737,7 +801,8 @@ function renderGradedApi() {
   const el = $('#graded-api');
   if (!el) return;
   const r = cur.gradedApi;
-  const btn = `<button class="block" id="graded-load">${r && r.status === 'ok' ? 'Neu laden' : 'Graded-Preise laden'} <span class="meta">(2 von 100 Gratis-Abrufen pro Tag)</span></button>`;
+  const rem = settings.pptRemaining && Date.now() - settings.pptRemaining.at < 86400000 ? settings.pptRemaining.n : null;
+  const btn = `<button class="block" id="graded-load">${r && r.status === 'ok' ? 'Jetzt neu laden' : 'Graded-Preise laden'} <span class="meta">(3 Credits${rem != null ? ', heute noch ' + rem : ''})</span></button>`;
   if (!settings.pptKey && !(r && r.status === 'ok')) {
     el.innerHTML = `<p class="hint">Für PSA-, CGC- und BGS-Preise einmalig einen kostenlosen Schlüssel von Pokemon Price Tracker unter Optionen eintragen.</p><button class="block" id="graded-settings">Zu den Optionen</button>`;
     $('#graded-settings').addEventListener('click', () => show('settings'));
@@ -833,12 +898,13 @@ function renderMarket() {
   if (!el) return;
   const cm = cur.pricing.cardmarket;
   const tp = cur.pricing.tcgplayer;
-  const k = settings.cf[cur.myCond] / settings.cf[cur.refCond];
+  const ecf = effectiveCF(cur.gradedApi?.data);
+  const k = ecf.cf[cur.myCond] / ecf.cf[cur.refCond];
   const adj = (v) => (v == null ? null : v * k);
   const tabs = `<div class="seg cond-seg">${Object.keys(settings.cf).map((z) => `<button data-z="${z}" class="${z === cur.myCond ? 'on' : ''}">${z}</button>`).join('')}</div>`;
   const note = cur.myCond === cur.refCond
     ? `<p class="date">Preise für ${condText(cur.refCond)}, so wie der Markt sie meldet.</p>`
-    : `<p class="date">Umgerechnet auf ${condText(cur.myCond)}: Marktpreis × ${k.toLocaleString('de-DE', { maximumFractionDigits: 2 })} (dein Zustandsfaktor).</p>`;
+    : `<p class="date">Umgerechnet auf ${condText(cur.myCond)}: Marktpreis × ${k.toLocaleString('de-DE', { maximumFractionDigits: 2 })} (${ecf.fromMarket ? 'aus echten TCGplayer-Zustandspreisen dieser Karte' : 'dein Zustandsfaktor'}).</p>`;
   const cmRow = (label, f) => `<tr><td>${label}</td><td>${eur(adj(cm[f]))}</td><td>${eur(adj(cm[f + '-holo']))}</td></tr>`;
   const cmHtml = cm
     ? `<table>
@@ -856,7 +922,21 @@ function renderMarket() {
       </table>
       <p class="date">Preisstand TCGplayer: <b>${dt(tp.updated)}</b> · ${fx ? `in Euro umgerechnet (1 US-Dollar = ${fx.rate.toLocaleString('de-DE', { maximumFractionDigits: 4 })} €, ${fx.manual ? 'eigener Kurs' : 'Kurs vom ' + new Date(fx.date).toLocaleDateString('de-DE')})` : 'Wechselkurs gerade nicht abrufbar, deshalb in US-Dollar. Eigenen Kurs unter Optionen eintragen.'}</p>`
     : '';
-  el.innerHTML = tabs + note + cmHtml + tpHtml;
+  const src = marketSources(cur.pricing, cur.gradedApi?.data, cur.offers, cur.useHolo);
+  const komb = combine(src);
+  const ppt = cur.gradedApi?.status === 'ok' ? cur.gradedApi.data : null;
+  const tcgCond = ppt?.conditions?.[CM_TO_TCG[cur.myCond]];
+  const kombHtml = komb != null
+    ? `<div class="hero"><div class="lbl">Kombinierter Marktwert · ${condText(cur.myCond)}</div>
+         <div class="val">${eur(komb * k)}</div>
+         <div class="sub">Median aus ${src.length} Quelle${src.length > 1 ? 'n' : ''}: ${src.map((x) => esc(x.label.replace(/^Cardmarket /, 'CM ').replace(/ \(aktuell\)$/, ''))).join(' · ')}</div></div>
+       ${tcgCond && fx ? `<p class="date">TCGplayer echt für ${CM_TO_TCG[cur.myCond]}: <b>${eur(tcgCond.usd * fx.rate)}</b> (ohne Umrechnung über Zustandsfaktor), Stand ${dt(tcgCond.date)}</p>` : ''}`
+    : '';
+  const condTable = ppt && Object.keys(ppt.conditions || {}).length && fx
+    ? `<table><tr><th>TCGplayer je Zustand (echt)</th><th>Preis</th></tr>${Object.entries(ppt.conditions).map(([n, v]) => `<tr class="${n === CM_TO_TCG[cur.myCond] ? 'hl' : ''}"><td>${n}</td><td>${eur(v.usd * fx.rate)}</td></tr>`).join('')}</table>
+       <p class="date">Variante ${esc(tpVariant(ppt.printing || ''))} · Pokemon Price Tracker · abgerufen am ${dt(cur.gradedApi.fetchedAt)}${cur.gradedApi.fromCache ? ' (zwischengespeichert)' : ''}</p>`
+    : (settings.pptKey ? '<p class="date" id="ppt-status"></p>' : '');
+  el.innerHTML = tabs + note + kombHtml + cmHtml + condTable + tpHtml;
   $$('.cond-seg button', el).forEach((b) =>
     b.addEventListener('click', () => {
       cur.myCond = b.dataset.z;
@@ -921,6 +1001,7 @@ function renderOffers() {
       renderOffers();
     }),
   );
+  renderMarket();
   updateCalc();
 }
 
@@ -937,6 +1018,13 @@ function resolveRef() {
     const v = parseNum(cur.custom);
     if (v == null || v <= 0) return { error: 'Eigenen Referenzwert eingeben.' };
     return { value: v, label: 'Eigener Wert', date: Date.now(), dateLabel: 'Eingegeben am' };
+  }
+  if (t === 'kombi') {
+    const src = marketSources(cur.pricing, cur.gradedApi?.data, cur.offers, cur.useHolo);
+    if (!src.length) return { error: 'Keine Marktquellen verfügbar. Angebote eintragen oder eigenen Wert wählen.' };
+    const v = combine(src);
+    const newest = src.map((x) => new Date(x.date).getTime()).filter(Number.isFinite).sort((a, b) => b - a)[0];
+    return { value: v, label: `Kombinierter Marktwert aus ${src.length} Quelle${src.length > 1 ? 'n' : ''}`, date: newest, dateLabel: 'Neueste Quelle vom', isApi: true, field: 'kombi', sources: src };
   }
   if (t === 'tcgp') {
     const m = tpMarket(cur.pricing);
@@ -971,8 +1059,9 @@ function updateCalc() {
     return;
   }
   const pf = settings.platforms[cur.platform];
+  const ecf = effectiveCF(cur.gradedApi?.data);
   const r = evaluate({
-    referenz: ref.value, cf: settings.cf, lf: settings.lf,
+    referenz: ref.value, cf: ecf.cf, lf: settings.lf,
     meinZustand: cur.myCond, refZustand: cur.refCond,
     meineSprache: cur.myLang, refSprache: cur.refLang,
     provision: pf.provision, versand: pf.versand, minNetto: settings.minNetto,
@@ -988,8 +1077,9 @@ function updateCalc() {
     </div>
     <h3>Herleitung</h3>
     <div class="line"><span>Ausgangspreis: ${esc(ref.label)}</span><b>${eur(ref.value)}</b></div>
+    ${ref.sources ? `<ul class="src-list">${ref.sources.map((x) => `<li><span>${esc(x.label)} <span class="meta">${new Date(x.date).toLocaleDateString('de-DE')}</span></span><b>${eur(x.eur)}</b></li>`).join('')}</ul><p class="date">Kombiniert = Median der Quellen. Ungegradete eBay-Verkäufe gibt es per Schnittstelle nicht mehr; trag sie unter „Angebote“ als eBay ein, dann zählen sie mit.</p>` : ''}
     <p class="date">${ref.dateLabel} ${dt(ref.date)}</p>
-    ${cur.myCond !== cur.refCond ? `<div class="line"><span>Zustand ${cur.myCond} statt ${cur.refCond}</span><b>× ${f2(r.zf)}</b></div>` : ''}
+    ${cur.myCond !== cur.refCond ? `<div class="line"><span>Zustand ${cur.myCond} statt ${cur.refCond}${ecf.fromMarket ? ' (laut echten Marktpreisen)' : ''}</span><b>× ${f2(r.zf)}</b></div>` : ''}
     ${cur.myLang !== cur.refLang ? `<div class="line"><span>Sprache ${esc(LANG_LABELS[cur.myLang] || cur.myLang)} statt ${esc(LANG_LABELS[cur.refLang] || cur.refLang)}</span><b>× ${f2(r.sf)}</b></div>` : ''}
     <div class="line"><span>Verkaufswert deiner Karte</span><b>${eur(r.brutto)}</b></div>
     <div class="line"><span>Abzüglich ${fmt1(pf.provision * 100)} % Gebühr und ${eur(pf.versand)} Versand (${esc(pf.label)})</span><b class="big">${eur(r.netto)}</b></div>
@@ -1001,10 +1091,10 @@ function updateCalc() {
     <h3>Preis je Zustand (${esc(LANG_LABELS[cur.myLang] || cur.myLang)})</h3>
     <table class="ladder cond-table">
       <tr><th>Zustand</th><th>Verkaufswert</th><th>Nach Kosten</th><th>Höchstens zahlen (80 %)</th></tr>
-      ${preiseJeZustand({ referenz: ref.value, cf: settings.cf, refZustand: cur.refCond, sprachFaktor: r.sf, provision: pf.provision, versand: pf.versand })
+      ${preiseJeZustand({ referenz: ref.value, cf: ecf.cf, refZustand: cur.refCond, sprachFaktor: r.sf, provision: pf.provision, versand: pf.versand })
         .map((z) => `<tr data-cond="${z.zustand}" class="${z.zustand === cur.myCond ? 'hl' : ''}"><td>${z.zustand} <span class="meta">${CONDITION_LABELS[z.zustand] || ''}</span></td><td>${eur(z.brutto)}</td><td>${eur(z.netto)}</td><td>${eur(z.maxGebot80)}</td></tr>`).join('')}
     </table>
-    <p class="date">Abgeleitet vom Ausgangspreis (${cur.refCond}) über deine Zustandsfaktoren. Zeile antippen, um den Zustand deiner Karte zu wählen.</p>
+    <p class="date">Abgeleitet vom Ausgangspreis (${cur.refCond}) über ${ecf.fromMarket ? 'die echten Zustandspreise dieser Karte bei TCGplayer' : 'deine Zustandsfaktoren'}. Zeile antippen, um den Zustand deiner Karte zu wählen.</p>
     ${r.netto <= 0 ? '<div class="warn">Netto ist null oder negativ. Bei diesen Kosten lohnt sich kein Ankauf.</div>' : ''}
     ${r.unterMindest ? `<div class="warn">Netto unter ${eur(settings.minNetto)}: Der Flip trägt sich einzeln nicht, er lohnt sich nur im Sammelversand.</div>` : ''}`;
   const buy = $('#inv-buy');
@@ -1046,6 +1136,7 @@ async function saveToInventory() {
     manualRef: ref && !ref.isApi ? { value: ref.value, date: ref.date, label: ref.label } : null,
     pricing: cur.pricing,
     fetchedAt: cur.fetchedAt,
+    offers: cur.offers.map((o) => ({ v: o.v, on: o.on, src: o.src })),
     grading: cur.grading || null,
     gradedApi: cur.gradedApi && cur.gradedApi.status === 'ok' ? { data: cur.gradedApi.data, fetchedAt: cur.gradedApi.fetchedAt } : null,
     graded: cur.graded && Object.keys(cur.graded).length ? cur.graded : null,
@@ -1061,7 +1152,12 @@ function itemValue(it) {
   const cm = it.pricing?.cardmarket;
   let ref = null, src = null, date = null;
   const tpm = it.marketField === 'tcgp' && it.pricing ? tpMarket(it.pricing) : null;
-  if (tpm && fx) {
+  const ksrc = it.marketField === 'kombi' ? marketSources(it.pricing, it.gradedApi?.data, it.offers || [], false) : null;
+  if (ksrc && ksrc.length) {
+    ref = combine(ksrc);
+    src = `Kombinierter Marktwert (${ksrc.length} Quellen)`;
+    date = ksrc.map((x) => new Date(x.date).getTime()).filter(Number.isFinite).sort((a, b) => b - a)[0];
+  } else if (tpm && fx) {
     ref = tpm.usd * fx.rate;
     src = `TCGplayer Marktpreis ${tpVariant(tpm.variant)}`;
     date = tpm.updated;
@@ -1074,7 +1170,7 @@ function itemValue(it) {
     src = it.manualRef.label;
     date = it.manualRef.date;
   }
-  const value = marktwert({ referenz: ref, cf: settings.cf, lf: settings.lf, zustand: it.zustand, sprache: it.sprache, refZustand: it.refZustand, refSprache: it.refSprache });
+  const value = marktwert({ referenz: ref, cf: effectiveCF(it.gradedApi?.data).cf, lf: settings.lf, zustand: it.zustand, sprache: it.sprache, refZustand: it.refZustand, refSprache: it.refSprache });
   return { value, ref, src, date };
 }
 
@@ -1293,7 +1389,14 @@ function renderSettings() {
     <div class="card">
       <h2>Graded-Preise (Pokemon Price Tracker)</h2>
       <label>API-Schlüssel<input id="set-ppt" type="password" autocomplete="off" placeholder="pokeprice_…" value="${esc(settings.pptKey || '')}" /></label>
-      <p class="hint">Kostenlos: 100 Abrufe pro Tag, eine Karte mit Graded-Preisen kostet 2. Schlüssel holen unter <a href="https://www.pokemonpricetracker.com/api" target="_blank" rel="noopener">pokemonpricetracker.com/api</a>. Er bleibt auf diesem Gerät und geht nur über deinen eigenen Cloudflare-Worker an Pokemon Price Tracker.</p>
+      <p class="hint">Kostenlos: 100 Credits pro Tag. Schlüssel holen unter <a href="https://www.pokemonpricetracker.com/api" target="_blank" rel="noopener">pokemonpricetracker.com/api</a>. Er bleibt auf diesem Gerät und geht nur über deinen eigenen Cloudflare-Worker an Pokemon Price Tracker.</p>
+      <label class="row" style="margin-top:8px"><span>Zustände</span>
+        <select id="set-cf-market"><option value="1" ${settings.cfFromMarket !== false ? 'selected' : ''}>Echte Zustandspreise nutzen, wenn vorhanden</option><option value="0" ${settings.cfFromMarket === false ? 'selected' : ''}>Immer meine Zustandsfaktoren</option></select>
+      </label>
+      <label class="row" style="margin-top:8px"><span>Automatisch</span>
+        <select id="set-ppt-auto"><option value="1" ${settings.pptAuto !== false ? 'selected' : ''}>Beim Öffnen einer Karte laden</option><option value="0" ${settings.pptAuto === false ? 'selected' : ''}>Nur per Knopf</option></select>
+      </label>
+      <p class="hint">Ein Abruf liefert aktuelle TCGplayer-Preise je Zustand und die Graded-Preise zusammen (3 Credits, 24 h zwischengespeichert). Gratis reicht das für etwa 30 Karten am Tag.${settings.pptRemaining ? ' Heute noch ' + settings.pptRemaining.n + ' Credits.' : ''}</p>
       <button id="set-ppt-test" class="block">Verbindung testen</button>
       <p id="set-ppt-result" class="status"></p>
     </div>
@@ -1342,6 +1445,14 @@ function renderSettings() {
     settings.pptKey = e.target.value.trim();
     saveSettings();
     toast(settings.pptKey ? 'Schlüssel gespeichert' : 'Schlüssel entfernt');
+  });
+  $('#set-cf-market').addEventListener('change', (e) => {
+    settings.cfFromMarket = e.target.value === '1';
+    saveSettings();
+  });
+  $('#set-ppt-auto').addEventListener('change', (e) => {
+    settings.pptAuto = e.target.value === '1';
+    saveSettings();
   });
   $('#set-ppt-test').addEventListener('click', async () => {
     const out = $('#set-ppt-result');

@@ -148,3 +148,12 @@ export function parseCardNumberLoose(text, isValidTotal) {
   cands.sort((a, b) => a.score - b.score);
   return cands.length ? { number: cands[0].number, total: cands[0].total } : null;
 }
+
+/** Cardmarket-Zustand -> TCGplayer-Zustand (übliche Zuordnung). */
+export const CM_TO_TCG = { MT: 'Near Mint', NM: 'Near Mint', EX: 'Lightly Played', GD: 'Moderately Played', LP: 'Moderately Played', PL: 'Heavily Played', PO: 'Damaged' };
+
+/** Kombinierter Marktwert = Median der Quellen (robust gegen eine Ausreißer-Quelle). */
+export function combine(sources) {
+  const vals = sources.map((s) => s.eur).filter((v) => Number.isFinite(v) && v > 0);
+  return stats(vals).median;
+}
