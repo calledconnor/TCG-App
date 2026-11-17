@@ -9,3 +9,4 @@ package-lock.json
 README.md
 .gitignore
 .assetsignore
+worker.js

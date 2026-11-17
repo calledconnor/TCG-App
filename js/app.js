@@ -4,7 +4,7 @@ import {
 } from './calc.js';
 import {
   ALL_LANGS, setApiBase, probeLanguages, searchByName, searchByNumber,
-  getCard, extractPricing, englishName, setIdOf, getSets, usdEur,
+  getCard, extractPricing, englishName, setIdOf, getSets, usdEur, searchSmart,
 } from './api.js';
 import { db, kvGet, kvSet } from './db.js';
 
@@ -66,14 +66,23 @@ async function loadSettings() {
 const saveSettings = () => kvSet('settings', settings);
 
 // ---------- Navigation ----------
-function show(view) {
+const scroller = $('main');
+const scrollMem = {};
+let curView = 'search';
+function show(view, { push = true, keepScroll = true } = {}) {
+  if (view !== curView) scrollMem[curView] = scroller.scrollTop;
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + view));
   $$('.tabbar button').forEach((b) => b.classList.toggle('on', b.dataset.view === view));
   if (view === 'inv') renderInventory();
   if (view === 'settings') renderSettings();
-  window.scrollTo(0, 0);
+  const changed = view !== curView;
+  curView = view;
+  if (changed) scroller.scrollTop = keepScroll ? scrollMem[view] || 0 : 0;
+  if (push && changed) history.pushState({ view }, '', '#' + view);
 }
 $$('.tabbar button').forEach((b) => b.addEventListener('click', () => show(b.dataset.view)));
+addEventListener('popstate', (e) => show((e.state && e.state.view) || 'search', { push: false }));
+history.replaceState({ view: 'search' }, '', location.pathname + location.search);
 
 function updateNet() {
   const el = $('#net-status');
@@ -117,15 +126,15 @@ function renderResults(groups) {
       (title ? `<h4>${esc(title)}</h4>` : '') +
       items
         .map((c) => `
-        <button class="result" data-id="${esc(c.id)}">
+        <button class="result" data-id="${esc(c.id)}" data-lang="${esc(c.lang || settings.searchLang)}">
           ${img(c.image, 'low', c.name)}
-          <span class="txt"><span class="n">${esc(c.name)}</span>
+          <span class="txt"><span class="n">${esc(c.name)}${c.lang && c.lang !== settings.searchLang ? ` <span class="tag">${esc(c.lang.toUpperCase())}</span>` : ''}</span>
           <span class="s">${esc(c.setName || c.setId)} · ${esc(c.localId)}${c.setCount ? '/' + c.setCount.official : ''}</span></span>
         </button>`)
         .join(''),
     )
     .join('');
-  $$('.result', el).forEach((b) => b.addEventListener('click', () => openCard(settings.searchLang, b.dataset.id)));
+  $$('.result', el).forEach((b) => b.addEventListener('click', () => openCard(b.dataset.lang, b.dataset.id)));
 }
 
 $('#form-name').addEventListener('submit', async (e) => {
@@ -135,9 +144,11 @@ $('#form-name').addEventListener('submit', async (e) => {
   setStatus('Suche …');
   $('#results').innerHTML = '';
   try {
-    const list = await searchByName(settings.searchLang, q);
-    setStatus(list.length ? `${list.length} Treffer` : `Keine Treffer für „${q}“. Der Name muss in der gewählten Sprache stehen.`);
-    renderResults([{ items: list.slice().sort((a, b) => (b.image ? 1 : 0) - (a.image ? 1 : 0)).slice(0, 120) }]);
+    const list = await searchSmart(settings.searchLang, q, langAvail);
+    setStatus(list.length ? `${list.length} Treffer · beste zuerst` : `Keine Treffer für „${q}“. Anderen Namen oder die Kartennummer versuchen.`);
+    const best = list.filter((c) => c._s < 3);
+    const rest = list.filter((c) => c._s >= 3);
+    renderResults(best.length && rest.length ? [{ items: best }, { title: 'Weitere ähnliche Karten', items: rest }] : [{ items: list }]);
   } catch (err) {
     setStatus(err.message, true);
   }
@@ -294,7 +305,8 @@ $('#crop-ok').addEventListener('click', async () => {
 
 // ---------- Bewerten ----------
 async function openCard(lang, id) {
-  show('eval');
+  show('eval', { keepScroll: false });
+  scroller.scrollTop = 0;
   $('#eval-empty').classList.add('hidden');
   $('#eval').innerHTML = '<p class="status">Lade Preise …</p>';
   try {
@@ -305,34 +317,61 @@ async function openCard(lang, id) {
     }
     const card = r.data;
     const pricing = extractPricing(card);
-    const myLang = tcgLangToLf(lang) || 'en';
+    const myLang = tcgLangToLf(settings.searchLang) || tcgLangToLf(lang) || 'en';
     const prev = cur;
     cur = {
       lang, card, pricing, fetchedAt: r.fetchedAt, fromCache: r.fromCache, stale: r.stale,
       enName: lang === 'en' ? { name: card.name, set: card.set?.name } : null,
       offers: prev && prev.card.id === card.id ? prev.offers : [],
       offerFilter: 'all',
-      refType: prev?.refType && prev.card.id === card.id ? prev.refType : 'median',
+      refType: prev && prev.card.id === card.id ? prev.refType : autoRef(pricing, prev && prev.card.id === card.id ? prev.offers : []),
+      refAuto: !(prev && prev.card.id === card.id && !prev.refAuto),
       useHolo: false,
       custom: '',
       refLang: 'en', refCond: 'NM',
-      myLang, myLangUnmapped: !tcgLangToLf(lang),
-      myCond: 'NM',
+      myLang, myLangUnmapped: !tcgLangToLf(settings.searchLang) && !tcgLangToLf(lang),
+      myCond: prev ? prev.myCond : 'NM',
       platform: settings.platform,
     };
     cur.ebayQuery = `${card.name} ${card.localId}/${card.set?.cardCount?.official ?? ''}`.trim();
     renderEval();
-    if (!cur.enName) {
+    if (!fx || fx.stale) loadFx();
+    if (!cur.enName || !card.image) {
       englishName(card.id).then((en) => {
         if (cur && cur.card.id === card.id && en) {
           cur.enName = en;
           renderLinks();
+          if (!card.image && en.image) {
+            card.image = en.image; // gleiche Karte, Bild der englischen Ausgabe
+            const ph = $('#eval .head .thumb-ph');
+            if (ph) ph.outerHTML = img(en.image, 'high', card.name);
+          }
         }
       });
     }
   } catch (err) {
     $('#eval').innerHTML = `<p class="status err">${esc(err.message)}</p>`;
   }
+}
+
+/** Sinnvolle Standard-Referenz: Angebote > cardmarket.trend > cardmarket.avg30 > TCGplayer market. */
+function autoRef(pricing, offers) {
+  if (offers && offers.some((o) => o.on)) return 'median';
+  const cm = pricing.cardmarket;
+  if (cm && cm.trend != null) return 'trend';
+  if (cm && cm.avg30 != null) return 'avg30';
+  if (tpMarket(pricing)) return 'tcgp';
+  return 'median';
+}
+/** TCGplayer-Marktpreis (USD) der ersten Variante, die einen hat. */
+function tpMarket(pricing) {
+  const tp = pricing.tcgplayer;
+  if (!tp) return null;
+  for (const v of tp.variants) {
+    const val = v.fields.marketPrice ?? v.fields.midPrice;
+    if (val != null) return { usd: val, variant: v.key, updated: tp.updated };
+  }
+  return null;
 }
 
 const REF_OPTIONS = [
@@ -342,6 +381,7 @@ const REF_OPTIONS = [
   ['trend', 'cardmarket.trend'],
   ['avg7', 'cardmarket.avg7'],
   ['avg30', 'cardmarket.avg30'],
+  ['tcgp', 'TCGplayer market (in EUR)'],
   ['custom', 'Eigener Wert'],
 ];
 
@@ -349,28 +389,11 @@ function renderEval() {
   const c = cur.card;
   const cm = cur.pricing.cardmarket;
   const tp = cur.pricing.tcgplayer;
-  const cmRow = (label, f) => `<tr><td>${label}</td><td>${eur(cm[f])}</td><td>${eur(cm[f + '-holo'])}</td></tr>`;
-  const cmHtml = cm
-    ? `<table>
-        <tr><th>Cardmarket (EUR)</th><th>normal</th><th>holo</th></tr>
-        ${cmRow('trend', 'trend')}${cmRow('avg', 'avg')}${cmRow('low', 'low')}
-        ${cmRow('avg1', 'avg1')}${cmRow('avg7', 'avg7')}${cmRow('avg30', 'avg30')}
-      </table>
-      <p class="date">Preisstand Cardmarket: <b>${dt(cm.updated)}</b></p>`
-    : '<p class="hint">Keine Cardmarket-Daten bei TCGdex für diese Karte.</p>';
-  const toEur = (v) => (v != null && fx ? eur(v * fx.rate) : '–');
-  const tpHtml = tp && tp.variants.length
-    ? `<table>
-        <tr><th>TCGplayer (in EUR)</th><th>low</th><th>mid</th><th>market</th><th>high</th></tr>
-        ${tp.variants.map((v) => `<tr><td>${esc(v.key)}</td><td>${toEur(v.fields.lowPrice)}</td><td>${toEur(v.fields.midPrice)}</td><td>${toEur(v.fields.marketPrice)}</td><td>${toEur(v.fields.highPrice)}</td></tr>`).join('')}
-      </table>
-      <p class="date">Preisstand TCGplayer: <b>${dt(tp.updated)}</b> · ${fx ? `umgerechnet zum ${fx.manual ? 'manuellen Kurs' : 'EZB-Kurs vom ' + new Date(fx.date).toLocaleDateString('de-DE')} (1 USD = ${fx.rate.toLocaleString('de-DE', { maximumFractionDigits: 4 })} EUR)` : 'kein Wechselkurs verfügbar, Kurs in den Einstellungen eintragen'} · US-Markt, nur zur Info</p>`
-    : '<p class="hint">Keine TCGplayer-Daten bei TCGdex.</p>';
-
   const condOpts = (sel) => Object.keys(settings.cf).map((k) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${k} – ${CONDITION_LABELS[k] || k}</option>`).join('');
   const langOpts = (sel) => Object.keys(settings.lf).map((k) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${LANG_LABELS[k] || k}</option>`).join('');
 
   $('#eval').innerHTML = `
+    <button class="ghost small back" id="back-btn">‹ Zurück</button>
     <div class="card">
       <div class="head">
         ${img(c.image, 'high', c.name)}
@@ -386,9 +409,8 @@ function renderEval() {
     </div>
 
     <div class="card">
-      <h2>Marktpreise (TCGdex)</h2>
-      ${cmHtml}
-      ${tpHtml}
+      <h2>Marktpreise</h2>
+      <div id="market"></div>
     </div>
 
     <div class="card">
@@ -461,10 +483,13 @@ function renderEval() {
     </div>`;
 
   $('#reload-card').addEventListener('click', () => openCard(cur.lang, cur.card.id));
+  $('#back-btn').addEventListener('click', () => (history.length > 1 ? history.back() : show('search')));
   $('#ref-holo').value = cur.useHolo ? '1' : '0';
   const bind = (sel, key, conv = (v) => v) =>
     $(sel).addEventListener('input', (e) => {
       cur[key] = conv(e.target.value);
+      if (key === 'refType') cur.refAuto = false;
+      if (key === 'myCond' || key === 'refCond') renderMarket();
       if (key === 'platform') {
         settings.platform = cur.platform;
         saveSettings();
@@ -483,6 +508,10 @@ function renderEval() {
   const addOffers = (vals) => {
     const src = $('#offer-src').value;
     for (const v of vals) cur.offers.push({ id: uid(), v, on: true, src });
+    if (cur.refAuto && cur.refType !== 'median') {
+      cur.refType = 'median';
+      $('#ref-type').value = 'median';
+    }
     renderOffers();
   };
   $('#offer-add').addEventListener('click', () => {
@@ -516,8 +545,50 @@ function renderEval() {
   });
   $('#inv-save').addEventListener('click', saveToInventory);
 
+  renderMarket();
   renderLinks();
   renderOffers();
+}
+
+/** Marktpreise mit Zustandsleiste: alle Werte über CF[Zustand] / CF[Referenzzustand] umgerechnet. */
+function renderMarket() {
+  const el = $('#market');
+  if (!el) return;
+  const cm = cur.pricing.cardmarket;
+  const tp = cur.pricing.tcgplayer;
+  const k = settings.cf[cur.myCond] / settings.cf[cur.refCond];
+  const adj = (v) => (v == null ? null : v * k);
+  const tabs = `<div class="seg cond-seg">${Object.keys(settings.cf).map((z) => `<button data-z="${z}" class="${z === cur.myCond ? 'on' : ''}">${z}</button>`).join('')}</div>`;
+  const note = cur.myCond === cur.refCond
+    ? `<p class="date">Zustand ${cur.refCond} – ${CONDITION_LABELS[cur.refCond]} (Basis der Marktdaten)</p>`
+    : `<p class="date">Umgerechnet auf ${cur.myCond} – ${CONDITION_LABELS[cur.myCond]}: Basis ${cur.refCond} × ${k.toLocaleString('de-DE', { maximumFractionDigits: 3 })} (Zustandsfaktoren)</p>`;
+  const cmRow = (label, f) => `<tr><td>${label}</td><td>${eur(adj(cm[f]))}</td><td>${eur(adj(cm[f + '-holo']))}</td></tr>`;
+  const cmHtml = cm
+    ? `<table>
+        <tr><th>Cardmarket</th><th>normal</th><th>holo</th></tr>
+        ${cmRow('trend', 'trend')}${cmRow('avg', 'avg')}${cmRow('low', 'low')}
+        ${cmRow('avg1', 'avg1')}${cmRow('avg7', 'avg7')}${cmRow('avg30', 'avg30')}
+      </table>
+      <p class="date">Preisstand Cardmarket: <b>${dt(cm.updated)}</b></p>`
+    : '<p class="hint">TCGdex hat für diese Karte keine Cardmarket-Daten. Preise über die Links unten prüfen und als Angebote eintragen.</p>';
+  const money = (usdVal) => (usdVal == null ? '–' : fx ? eur(usdVal * fx.rate * k) : (usdVal * k).toLocaleString('de-DE', { style: 'currency', currency: 'USD' }));
+  const tpHtml = tp && tp.variants.length
+    ? `<table>
+        <tr><th>TCGplayer${fx ? '' : ' (USD)'}</th><th>low</th><th>mid</th><th>market</th><th>high</th></tr>
+        ${tp.variants.map((v) => `<tr><td>${esc(v.key)}</td><td>${money(v.fields.lowPrice)}</td><td>${money(v.fields.midPrice)}</td><td>${money(v.fields.marketPrice)}</td><td>${money(v.fields.highPrice)}</td></tr>`).join('')}
+      </table>
+      <p class="date">Preisstand TCGplayer: <b>${dt(tp.updated)}</b> · ${fx ? `umgerechnet zum ${fx.manual ? 'manuellen Kurs' : (fx.source || 'EZB') + '-Kurs vom ' + new Date(fx.date).toLocaleDateString('de-DE')} (1 USD = ${fx.rate.toLocaleString('de-DE', { maximumFractionDigits: 4 })} EUR)` : 'Wechselkurs gerade nicht abrufbar, Werte in USD. Kurs lässt sich in den Einstellungen eintragen'} · US-Markt</p>`
+    : '';
+  el.innerHTML = tabs + note + cmHtml + tpHtml;
+  $$('.cond-seg button', el).forEach((b) =>
+    b.addEventListener('click', () => {
+      cur.myCond = b.dataset.z;
+      const sel = $('#my-cond');
+      if (sel) sel.value = cur.myCond;
+      renderMarket();
+      updateCalc();
+    }),
+  );
 }
 
 function renderLinks() {
@@ -590,9 +661,15 @@ function resolveRef() {
     if (v == null || v <= 0) return { error: 'Eigenen Referenzwert eingeben.' };
     return { value: v, label: 'Eigener Wert', date: Date.now(), dateLabel: 'eingegeben' };
   }
+  if (t === 'tcgp') {
+    const m = tpMarket(cur.pricing);
+    if (!m) return { error: 'Keine TCGplayer-Daten für diese Karte.' };
+    if (!fx) return { error: 'Wechselkurs nicht verfügbar. Kurs in den Einstellungen eintragen.' };
+    return { value: m.usd * fx.rate, label: `TCGplayer ${m.variant} market (${m.usd.toLocaleString('de-DE', { style: 'currency', currency: 'USD' })})`, date: m.updated, dateLabel: 'Preisstand', isApi: true, field: 'tcgp' };
+  }
   const cm = cur.pricing.cardmarket;
   const field = cur.useHolo ? `${t}-holo` : t;
-  if (!cm) return { error: 'Keine Cardmarket-Daten für diese Karte – andere Referenz wählen.' };
+  if (!cm) return { error: 'Keine Cardmarket-Daten für diese Karte. Referenz „TCGplayer market“ wählen oder Angebote eintragen.' };
   const v = cm[field];
   if (v == null) return { error: `cardmarket["${field}"] fehlt für diese Karte.` };
   return { value: v, label: `cardmarket["${field}"]`, date: cm.updated, dateLabel: 'Preisstand', isApi: true, field };
@@ -660,6 +737,7 @@ function updateCalc() {
     tr.addEventListener('click', () => {
       cur.myCond = tr.dataset.cond;
       $('#my-cond').value = cur.myCond;
+      renderMarket();
       updateCalc();
     }),
   );
@@ -703,7 +781,12 @@ async function saveToInventory() {
 function itemValue(it) {
   const cm = it.pricing?.cardmarket;
   let ref = null, src = null, date = null;
-  if (cm && cm[it.marketField] != null) {
+  const tpm = it.marketField === 'tcgp' && it.pricing ? tpMarket(it.pricing) : null;
+  if (tpm && fx) {
+    ref = tpm.usd * fx.rate;
+    src = `TCGplayer ${tpm.variant} market`;
+    date = tpm.updated;
+  } else if (cm && cm[it.marketField] != null) {
     ref = cm[it.marketField];
     src = `cardmarket["${it.marketField}"]`;
     date = cm.updated;
@@ -1006,7 +1089,10 @@ function renderSettings() {
 async function loadFx() {
   if (settings.usdEurManual) fx = { rate: settings.usdEurManual, manual: true };
   else fx = await usdEur().catch(() => null);
-  if (cur && $('#view-eval').classList.contains('active')) renderEval();
+  if (cur) {
+    renderMarket();
+    updateCalc();
+  }
 }
 
 // ---------- Start ----------

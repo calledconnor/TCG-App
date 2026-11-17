@@ -16,7 +16,8 @@ export const ALL_LANGS = [
 // Laut Doku sicher; ja/ko/zh-tw werden zur Laufzeit geprüft.
 const DOC_LANGS = ['en', 'de', 'fr', 'it', 'es', 'pt-br'];
 
-let BASE = 'https://api.tcgdex.net/v2';
+const DEFAULT_BASE = 'https://api.tcgdex.net/v2';
+let BASE = DEFAULT_BASE;
 export function setApiBase(b) {
   BASE = (b || 'https://api.tcgdex.net/v2').replace(/\/+$/, '');
 }
@@ -40,7 +41,15 @@ export async function getJSON(path, { maxAge = 0, force = false } = {}) {
     return { data: cached.data, fetchedAt: cached.fetchedAt, fromCache: true, status: cached.status };
   }
   try {
-    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    let res;
+    try {
+      res = await fetch(url, { headers: { Accept: 'application/json' } });
+    } catch (netErr) {
+      // Fallback: eigener Cloudflare-Worker (same origin), falls der Browser TCGdex direkt blockt
+      if (BASE !== DEFAULT_BASE || location.protocol !== 'https:') throw netErr;
+      res = await fetch(location.origin + '/api/tcgdex' + path, { headers: { Accept: 'application/json' } });
+      if (!(res.headers.get('content-type') || '').includes('json') && res.status !== 404) throw netErr;
+    }
     if (res.status === 404) {
       const rec = { url, data: null, status: 404, fetchedAt: Date.now() };
       db.put('cache', rec).catch(() => {});
@@ -108,13 +117,67 @@ function enrich(list, sets) {
   });
 }
 
-/** Namenssuche (enthält, case-insensitive). Leerzeichen/Bindestrich-Varianten werden zusammengeführt. */
-export async function searchByName(lang, name) {
+/**
+ * Breite Namenssuche: gewählte Sprache + Englisch + Deutsch, Leerzeichen/Bindestrich-Varianten,
+ * bei wenigen Treffern zusätzlich Einzelwörter und Wortanfang (fängt Tippfehler am Ende ab).
+ * Ergebnis nach Relevanz sortiert, jedes Element trägt seine Sprache (lang).
+ */
+export async function searchSmart(lang, name, available = {}) {
   const q = name.trim();
   if (!q) return [];
+  const langs = [...new Set([lang, 'en', 'de'])].filter((l) => available[l] !== false);
   const variants = new Set([q]);
   if (/\s/.test(q)) variants.add(q.replace(/\s+/g, '-'));
   if (/-/.test(q)) variants.add(q.replace(/-/g, ' '));
+
+  const merged = new Map(); // id -> brief (bevorzugt gewählte Sprache)
+  const runRound = async (terms, ls) => {
+    const jobs = [];
+    for (const l of ls) for (const t of terms) jobs.push(searchByName(l, t, false).then((list) => list.map((c) => ({ ...c, lang: l }))).catch(() => []));
+    for (const list of await Promise.all(jobs)) {
+      for (const c of list) {
+        const had = merged.get(c.id);
+        if (!had || (had.lang !== lang && c.lang === lang)) merged.set(c.id, { ...c, image: c.image || had?.image });
+        else if (!had.image && c.image) had.image = c.image; // Bild aus anderer Sprache übernehmen
+      }
+    }
+  };
+  await runRound([...variants], langs);
+
+  if (merged.size < 15) {
+    const words = q.toLowerCase().split(/[\s-]+/).filter((w) => w.length >= 3);
+    const extra = new Set(words);
+    const first = words[0] || q.toLowerCase();
+    if (first.length >= 5) extra.add(first.slice(0, Math.max(4, first.length - 2)));
+    for (const v of variants) extra.delete(v.toLowerCase());
+    if (extra.size) await runRound([...extra], [...new Set([lang, 'en'])].filter((l) => available[l] !== false));
+  }
+
+  const ql = q.toLowerCase();
+  const norm = (x) => x.toLowerCase().replace(/[-\s]+/g, ' ');
+  const qn = norm(q);
+  const words = qn.split(' ').filter(Boolean);
+  const score = (c) => {
+    const n = norm(c.name);
+    if (n === qn) return 0;
+    if (n.startsWith(qn)) return 1;
+    if (n.includes(qn)) return 2;
+    if (words.every((w) => n.includes(w))) return 3;
+    return 4;
+  };
+  return [...merged.values()]
+    .map((c) => ({ ...c, _s: score(c) + (c.lang === lang ? 0 : 0.5) }))
+    .sort((a, b) => a._s - b._s || (b.image ? 1 : 0) - (a.image ? 1 : 0) || a.name.localeCompare(b.name, 'de'))
+    .slice(0, 250);
+}
+
+/** Namenssuche (enthält, case-insensitive). Leerzeichen/Bindestrich-Varianten werden zusammengeführt. */
+export async function searchByName(lang, name, withVariants = true) {
+  const q = name.trim();
+  if (!q) return [];
+  const variants = new Set([q]);
+  if (withVariants && /\s/.test(q)) variants.add(q.replace(/\s+/g, '-'));
+  if (withVariants && /-/.test(q)) variants.add(q.replace(/-/g, ' '));
   const [sets, ...results] = await Promise.all([
     getSets(lang).catch(() => ({})),
     ...[...variants].map((v) => getJSON(`/${lang}/cards?${qs({ name: v })}`, { maxAge: DAY })),
@@ -188,26 +251,39 @@ export function extractPricing(card) {
 export async function englishName(id) {
   try {
     const r = await getJSON(`/en/cards/${encodeURIComponent(id)}`, { maxAge: 30 * DAY });
-    return r.data ? { name: r.data.name, set: r.data.set && r.data.set.name } : null;
+    return r.data ? { name: r.data.name, set: r.data.set && r.data.set.name, image: r.data.image || null } : null;
   } catch {
     return null;
   }
 }
 
-/** USD->EUR-Kurs der EZB (frankfurter.dev, kostenlos, CORS offen). 24 h in IndexedDB gecacht. */
-export async function usdEur() {
-  const url = 'https://api.frankfurter.dev/v1/latest?base=USD&symbols=EUR';
+/**
+ * USD->EUR-Kurs. Quellen der Reihe nach: eigener Worker (/api/fx, holt EZB-Kurs serverseitig),
+ * frankfurter.dev (EZB), jsDelivr currency-api. 24 h in IndexedDB gecacht.
+ */
+export async function usdEur({ force = false } = {}) {
+  const key = 'fx:usd-eur';
   let cached;
-  try { cached = await db.get('cache', url); } catch {}
-  if (cached && Date.now() - cached.fetchedAt < DAY) return { rate: cached.data.rates.EUR, date: cached.data.date };
-  try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-    if (!data?.rates?.EUR) throw new Error('kein Kurs');
-    db.put('cache', { url, data, status: 200, fetchedAt: Date.now() }).catch(() => {});
-    return { rate: data.rates.EUR, date: data.date };
-  } catch {
-    return cached ? { rate: cached.data.rates.EUR, date: cached.data.date, stale: true } : null;
+  try { cached = await db.get('cache', key); } catch {}
+  if (!force && cached && Date.now() - cached.fetchedAt < DAY) return cached.data;
+  const sources = [
+    location.protocol === 'https:' ? [location.origin + '/api/fx', (d) => d.rate && { rate: d.rate, date: d.date, source: d.source || 'EZB' }] : null,
+    ['https://api.frankfurter.dev/v1/latest?base=USD&symbols=EUR', (d) => d.rates?.EUR && { rate: d.rates.EUR, date: d.date, source: 'EZB' }],
+    ['https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json', (d) => d.usd?.eur && { rate: d.usd.eur, date: d.date, source: 'currency-api' }],
+  ].filter(Boolean);
+  for (const [url, parse] of sources) {
+    try {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 6000);
+      const res = await fetch(url, { signal: ctl.signal });
+      clearTimeout(t);
+      if (!res.ok || !(res.headers.get('content-type') || '').includes('json')) continue;
+      const data = parse(await res.json());
+      if (data && data.rate > 0) {
+        db.put('cache', { url: key, data, status: 200, fetchedAt: Date.now() }).catch(() => {});
+        return data;
+      }
+    } catch {}
   }
+  return cached ? { ...cached.data, stale: true } : null;
 }

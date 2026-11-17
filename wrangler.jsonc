@@ -1,9 +1,12 @@
-// Cloudflare Workers: liefert die App als statische Seite aus (kein Server-Code).
+// Cloudflare Workers: statische App + kleine Hilfs-Endpunkte (worker.js).
 {
   "name": "tcg-app",
+  "main": "worker.js",
   "compatibility_date": "2025-09-01",
   "assets": {
     "directory": "./",
-    "not_found_handling": "single-page-application"
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
   }
 }
