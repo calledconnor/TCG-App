@@ -734,6 +734,7 @@ async function openCard(lang, id) {
       myCond: prev ? prev.myCond : 'NM',
       platform: settings.platform,
       grading: prev && prev.card.id === card.id ? prev.grading : null,
+      askPrice: null, payPrice: null, payTouched: false, bought: null,
       graded: prev && prev.card.id === card.id ? prev.graded : {},
       gpGrade: prev && prev.card.id === card.id ? prev.gpGrade : 'PSA 10',
     };
@@ -857,62 +858,63 @@ const REF_OPTIONS = [
   ['custom', 'Eigener Wert'],
 ];
 
+const SRC_OPTIONS = [
+  ['kombi', 'Automatisch: Median aus Cardmarket und TCGplayer (empfohlen)'],
+  ['trend', 'Nur Cardmarket Trendpreis'],
+  ['avg30', 'Nur Cardmarket Ø 30 Tage'],
+  ['avg7', 'Nur Cardmarket Ø 7 Tage'],
+  ['tcgp', 'Nur TCGplayer (USA, in €)'],
+  ['custom', 'Eigenen Marktwert eingeben'],
+];
+const LANG_CHIPS = ['de', 'en', 'ja', 'fr', 'it', 'es', 'ko', 'zh'];
+
+/** Bewertung im Ankaufsmodus: Karte → Zustand/Sprache → Marktwert → Ankauf. */
 function renderEval() {
   const c = cur.card;
   const cm = cur.pricing.cardmarket;
-  const tp = cur.pricing.tcgplayer;
-  const condOpts = (sel) => Object.keys(settings.cf).map((k) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${condText(k)}</option>`).join('');
-  const langOpts = (sel) => Object.keys(settings.lf).map((k) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${LANG_LABELS[k] || k}</option>`).join('');
+  const hasHolo = cm && ['trend-holo', 'avg30-holo', 'avg7-holo', 'avg1-holo'].some((k) => cm[k] != null);
+  cur.refCond = 'NM';
+  cur.refLang = 'en';
+  if (cur.refType && !SRC_OPTIONS.some(([v]) => v === cur.refType)) cur.refType = 'kombi';
 
   $('#eval').innerHTML = `
     <button class="ghost small back" id="back-btn">‹ Zurück</button>
-    <div class="card">
-      <div class="head">
-        ${img(c.image, 'high', c.name)}
-        <div>
-          <p class="title">${esc(c.name)}</p>
-          <dl class="facts">
-            <dt>Set</dt><dd>${esc(c.set?.name || '–')}</dd>
-            <dt>Nummer</dt><dd>${esc(c.localId)}${c.set?.cardCount?.official ? ' von ' + c.set.cardCount.official : ''}</dd>
-            ${c.rarity ? `<dt>Seltenheit</dt><dd>${esc(c.rarity)}</dd>` : ''}
-            <dt>Kartentext</dt><dd>${esc(LANG_NAME[cur.lang] || cur.lang)}</dd>
-          </dl>
-          <p class="date">Preise abgerufen am ${dt(cur.fetchedAt)}${cur.fromCache ? ' <span class="tag">' + (cur.stale ? 'offline gespeichert' : 'zwischengespeichert') + '</span>' : ''}</p>
-          <button class="small" id="reload-card">Preise neu laden</button>
-        </div>
+    <div class="card ev-head">
+      ${img(c.image, 'high', c.name)}
+      <div>
+        <p class="title">${esc(c.name)}</p>
+        <div class="meta">${esc(c.set?.name || '–')} · Nr. ${esc(c.localId)}${c.set?.cardCount?.official ? '/' + c.set.cardCount.official : ''}</div>
+        ${c.rarity ? `<div class="meta">${esc(c.rarity)}</div>` : ''}
+        <p class="date">Preise vom ${dt(cur.fetchedAt)}${cur.fromCache ? (cur.stale ? ' · offline' : '') : ''} · <a href="#" id="reload-card">neu laden</a></p>
       </div>
     </div>
 
     <div class="card">
-      <h2>Marktpreise</h2>
-      <div id="market"></div>
+      <h2>Deine Karte</h2>
+      <div class="chip-label">Zustand</div>
+      <div class="chips cond-chips" id="ev-cond">
+        ${Object.keys(settings.cf).map((k) => `<button data-c="${k}" class="${k === cur.myCond ? 'on' : ''}"><b>${k}</b><span>${CONDITION_DE[k] || ''}</span></button>`).join('')}
+      </div>
+      <div class="chip-label">Sprache</div>
+      <div class="chips" id="ev-lang">
+        ${LANG_CHIPS.filter((k) => settings.lf[k] != null).map((k) => `<button data-l="${k}" class="${k === cur.myLang ? 'on' : ''}">${LANG_LABELS[k] || k}</button>`).join('')}
+      </div>
+      ${hasHolo ? `<div class="chip-label">Variante</div>
+      <div class="chips" id="ev-var"><button data-v="0" class="${!cur.useHolo ? 'on' : ''}">Standard</button><button data-v="1" class="${cur.useHolo ? 'on' : ''}">Reverse Holo</button></div>` : ''}
     </div>
 
-    <div class="card">
-      <h2>Bewertung</h2>
+    <div class="card" id="ev-value"></div>
+    <div class="card ev-buy" id="ev-buy"></div>
+
+    <details class="card ev-details" id="ev-details" ${cur.detailsOpen ? 'open' : ''}>
+      <summary>Details: Preisquellen, Rechnung, Ankaufsleiter</summary>
+      <label>Welcher Preis zählt?<select id="ref-type">${SRC_OPTIONS.map(([v, l]) => `<option value="${v}" ${v === cur.refType ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label id="row-custom" class="${cur.refType === 'custom' ? '' : 'hidden'}">Marktwert deiner Karte (in diesem Zustand und dieser Sprache) €<input id="ref-custom" inputmode="decimal" value="${esc(cur.custom || '')}" placeholder="z. B. 25" /></label>
+      <label>Verkaufen über<select id="platform">${Object.entries(settings.platforms).map(([k, p]) => `<option value="${k}" ${k === cur.platform ? 'selected' : ''}>${esc(p.label)} (${fmt1(p.provision * 100)} % Gebühr · Versand ${eur(p.versand)})</option>`).join('')}</select></label>
       <div id="calc-out" class="calc"></div>
-      <h3>Ausgangspreis</h3>
-      <label class="row"><span>Quelle</span>
-        <select id="ref-type">${REF_OPTIONS.map(([v, l]) => `<option value="${v}" ${v === cur.refType ? 'selected' : ''}>${l}</option>`).join('')}</select>
-      </label>
-      <label class="row" id="row-holo"><span>Variante</span>
-        <select id="ref-holo"><option value="0">Standard</option><option value="1">Reverse Holo</option></select>
-      </label>
-      <label class="row" id="row-custom"><span>Eigener Wert</span><input id="ref-custom" inputmode="decimal" placeholder="€" value="${esc(cur.custom)}" /></label>
-      <div class="grid2">
-        <label>Ausgangspreis gilt für Zustand<select id="ref-cond">${condOpts(cur.refCond)}</select></label>
-        <label>… und Sprache<select id="ref-lang">${langOpts(cur.refLang)}</select></label>
-      </div>
-      <h3>Meine Karte</h3>
-      <div class="grid2">
-        <label>Mein Zustand<select id="my-cond">${condOpts(cur.myCond)}</select></label>
-        <label>Meine Sprache<select id="my-lang">${langOpts(cur.myLang)}</select></label>
-      </div>
-      ${cur.myLangUnmapped ? `<p class="hint">Für „${esc(cur.lang)}“ gibt es keinen Sprachfaktor – bitte die Sprache von Hand wählen oder in den Einstellungen ergänzen.</p>` : ''}
-      <label class="row"><span>Verkauf über</span>
-        <select id="platform">${Object.entries(settings.platforms).map(([k, p]) => `<option value="${k}" ${k === cur.platform ? 'selected' : ''}>${esc(p.label)} (${fmt1(p.provision * 100)} % Gebühr · Versand ${eur(p.versand)})</option>`).join('')}</select>
-      </label>
-    </div>
+      <h3>Marktpreise</h3>
+      <div id="market"></div>
+    </details>
 
     <div class="card">
       <h2>Grading &amp; Graded-Preise</h2>
@@ -926,63 +928,17 @@ function renderEval() {
       </div>
       <a id="gp-ebay" class="btn block" target="_blank" rel="noopener" href="#">eBay: verkaufte Karten mit dieser Note</a>
       <div id="gp-list"></div>
-    </div>
-
-    <div class="card">
-      <h2>Zur Sammlung hinzufügen</h2>
-      <div class="grid2">
-        <label>Einkaufspreis €<input id="inv-buy" inputmode="decimal" placeholder="z. B. 20" /></label>
-        <label>Datum<input id="inv-date" type="date" value="${today()}" /></label>
-      </div>
-      <div class="grid2">
-        <label>Gekauft über<select id="inv-wo">${optsOf(WO, 'laden', '')}</select></label>
-        <label>Art<select id="inv-art">${optsOf(ART, 'festpreis', '')}</select></label>
-      </div>
-      <p class="hint" id="inv-pott"></p>
-      <label class="row"><span>Status</span>
-        <select id="inv-status"><option value="bestand">im Bestand</option><option value="beobachtet">beobachtet</option><option value="verkauft">verkauft</option></select>
-      </label>
-      <label class="row"><span>Verkaufspreis</span><input id="inv-sell" inputmode="decimal" placeholder="nur bei verkauft" /></label>
-      <label class="row"><span>Notiz</span><input id="inv-note" placeholder="optional" /></label>
-      <button id="inv-save" class="primary block">Speichern</button>
     </div>`;
 
-  $('#reload-card').addEventListener('click', () => openCard(cur.lang, cur.card.id));
+  $('#reload-card').addEventListener('click', (e) => { e.preventDefault(); openCard(cur.lang, cur.card.id); });
   $('#back-btn').addEventListener('click', goBack);
-  $('#ref-holo').value = cur.useHolo ? '1' : '0';
-  const bind = (sel, key, conv = (v) => v) =>
-    $(sel).addEventListener('input', (e) => {
-      cur[key] = conv(e.target.value);
-      if (key === 'refType') cur.refAuto = false;
-      if (key === 'myCond' || key === 'refCond') renderMarket();
-      if (key === 'platform') {
-        settings.platform = cur.platform;
-        saveSettings();
-      }
-      updateCalc();
-    });
-  bind('#ref-type', 'refType');
-  bind('#ref-holo', 'useHolo', (v) => v === '1');
-  bind('#ref-custom', 'custom');
-  bind('#ref-cond', 'refCond');
-  bind('#ref-lang', 'refLang');
-  bind('#my-cond', 'myCond');
-  bind('#my-lang', 'myLang');
-  bind('#platform', 'platform');
-
-  $('#inv-save').addEventListener('click', saveToInventory);
-  const pottHint = () => {
-    const el = $('#inv-pott');
-    if (!el) return;
-    const cfg = flipCfg();
-    const pf = portfolio(inventory, { start: cfg.start, marktwert: (it) => itemValue(it).value, platform: itemPlatform });
-    const buy = parseNum($('#inv-buy').value) || 0;
-    el.innerHTML = cfg.start > 0 || inventory.length
-      ? `Im Pott: <b>${eur(pf.kasse)}</b>${buy ? ` · nach diesem Kauf: <b class="${pf.kasse - buy < 0 ? 'neg' : ''}">${eur(pf.kasse - buy)}</b>` : ''}`
-      : 'Tipp: Unter „Sammlung“ ein Startkapital eintragen, dann rechnet die App deinen Pott mit.';
-  };
-  $('#inv-buy').addEventListener('input', pottHint);
-  pottHint();
+  $$('#ev-cond button').forEach((b) => b.addEventListener('click', () => { cur.myCond = b.dataset.c; $$('#ev-cond button').forEach((x) => x.classList.toggle('on', x === b)); updateCalc(); renderMarket(); }));
+  $$('#ev-lang button').forEach((b) => b.addEventListener('click', () => { cur.myLang = b.dataset.l; $$('#ev-lang button').forEach((x) => x.classList.toggle('on', x === b)); updateCalc(); }));
+  $$('#ev-var button').forEach((b) => b.addEventListener('click', () => { cur.useHolo = b.dataset.v === '1'; $$('#ev-var button').forEach((x) => x.classList.toggle('on', x === b)); updateCalc(); renderMarket(); }));
+  $('#ref-type').addEventListener('change', (e) => { cur.refType = e.target.value; cur.refAuto = false; $('#row-custom').classList.toggle('hidden', cur.refType !== 'custom'); updateCalc(); });
+  $('#ref-custom').addEventListener('input', (e) => { cur.custom = e.target.value; updateCalc(); });
+  $('#platform').addEventListener('change', (e) => { cur.platform = e.target.value; settings.platform = cur.platform; saveSettings(); updateCalc(); });
+  $('#ev-details').addEventListener('toggle', (e) => { cur.detailsOpen = e.target.open; });
 
   renderMarket();
   updateCalc();
@@ -1192,23 +1148,7 @@ function renderMarket() {
       <a class="btn small" target="_blank" rel="noopener" href="https://www.ebay.de/sch/i.html?_nkw=${encodeURIComponent(cur.ebayQuery)}&LH_Sold=1&LH_Complete=1&_sop=13">eBay verkauft ↗</a>
     </div>
     <p class="date">„Diese Karte“ sucht mit Set-Kürzel und Nummer (${esc(cmExact)}). Findet Cardmarket nichts, den zweiten Link nehmen und nach Erweiterung „${esc(cur.enName?.set || cur.card.set?.name || '')}“ filtern.</p>`;
-  el.innerHTML = tabs + note + plWarn + kombHtml + quick + cmHtml + condTable + tpHtml;
-  $$('.var-seg button', el).forEach((b) => b.addEventListener('click', () => {
-    cur.useHolo = b.dataset.v === '1';
-    const sel = $('#ref-holo');
-    if (sel) sel.value = cur.useHolo ? '1' : '0';
-    renderMarket();
-    updateCalc();
-  }));
-  $$('.cond-seg button', el).forEach((b) =>
-    b.addEventListener('click', () => {
-      cur.myCond = b.dataset.z;
-      const sel = $('#my-cond');
-      if (sel) sel.value = cur.myCond;
-      renderMarket();
-      updateCalc();
-    }),
-  );
+  el.innerHTML = note + kombHtml + cmHtml + condTable + tpHtml;
 }
 
 function renderLinks() {
@@ -1303,113 +1243,178 @@ function resolveRef() {
   return { value: v, label: cmLabel(field), date: cm.updated, dateLabel: 'Preisstand', isApi: true, field };
 }
 
-function updateCalc() {
-  if (!cur) return;
-  $('#row-holo').classList.toggle('hidden', !['trend', 'avg7', 'avg30'].includes(cur.refType));
-  $('#row-custom').classList.toggle('hidden', cur.refType !== 'custom');
-
-
-  const out = $('#calc-out');
+/** Rechnung für die aktuelle Karte: { ref, r, pf, ecf } oder { error }. */
+function computeEval() {
   const ref = resolveRef();
-  if (ref.error) {
-    out.innerHTML = `<p class="err">${esc(ref.error)}</p>`;
+  if (ref.error) return { error: ref.error };
+  const pf = settings.platforms[cur.platform];
+  const ecf = effectiveCF(cur.gradedApi?.data);
+  const custom = cur.refType === 'custom';
+  const r = evaluate({
+    referenz: ref.value, cf: ecf.cf, lf: settings.lf,
+    meinZustand: cur.myCond, refZustand: custom ? cur.myCond : 'NM',
+    meineSprache: cur.myLang, refSprache: custom ? cur.myLang : 'en',
+    provision: pf.provision, versand: pf.versand, minNetto: settings.minNetto,
+  });
+  return { ref, r, pf, ecf, custom };
+}
+
+function updateCalc() {
+  if (!cur || !$('#ev-value')) return;
+  const e = computeEval();
+  const valEl = $('#ev-value'), buyEl = $('#ev-buy'), out = $('#calc-out');
+  if (e.error) {
+    valEl.innerHTML = `<p class="err">${esc(e.error)}</p>`;
+    buyEl.innerHTML = '';
+    out.innerHTML = '';
     cur.last = null;
     return;
   }
-  const pf = settings.platforms[cur.platform];
-  const ecf = effectiveCF(cur.gradedApi?.data);
-  const r = evaluate({
-    referenz: ref.value, cf: ecf.cf, lf: settings.lf,
-    meinZustand: cur.myCond, refZustand: cur.refCond,
-    meineSprache: cur.myLang, refSprache: cur.refLang,
-    provision: pf.provision, versand: pf.versand, minNetto: settings.minNetto,
-  });
+  const { ref, r, pf, ecf, custom } = e;
   cur.last = { ref, r };
-  const f2 = (v) => v.toLocaleString('de-DE', { maximumFractionDigits: 3 });
-  const l80 = r.ladder.find((l) => l.highlight);
-  out.innerHTML = `
+  const f2 = (v) => v.toLocaleString('de-DE', { maximumFractionDigits: 2 });
+  const cm = cur.pricing.cardmarket;
+  const pl = cmPlausible(cm, cur.useHolo);
+  const enN = cur.enName?.name || cur.card.name;
+  const cmExact = [enN, cur.setAbbr || '', cur.card.localId].filter(Boolean).join(' ');
+  const pcQ = [enN, cur.enName?.set || cur.card.set?.name || '', cur.card.localId].filter(Boolean).join(' ');
+  const factors = custom ? '' : [
+    cur.myCond !== 'NM' ? `${cur.myCond} × ${f2(r.zf)}${ecf.fromMarket ? ' (echte Marktdaten)' : ''}` : '',
+    cur.myLang !== 'en' ? `${LANG_LABELS[cur.myLang] || cur.myLang} × ${f2(r.sf)}` : '',
+  ].filter(Boolean).join(' · ');
+
+  valEl.innerHTML = `
     <div class="hero">
-      <div class="lbl">Maximales Gebot bei 80 %</div>
-      <div class="val">${eur(l80.maxGebot)}</div>
-      <div class="sub">Netto <b>${eur(r.netto)}</b> · Gewinn <b class="${l80.gewinn >= 0 ? 'pos' : 'neg'}">${eur(l80.gewinn)}</b> · Rendite <b>${pct(l80.rendite)}</b></div>
+      <div class="lbl">Marktwert deiner Karte · ${cur.myCond} · ${esc(LANG_LABELS[cur.myLang] || cur.myLang)}${cur.useHolo ? ' · Reverse Holo' : ''}</div>
+      <div class="val">${eur(r.brutto)}</div>
+      <div class="sub">${custom ? 'Eigener Wert' : `${esc(ref.label.replace(/^Kombinierter Marktwert aus/, 'Median aus'))}: <b>${eur(ref.value)}</b> für Near Mint englisch`}${factors ? ' · ' + esc(factors) : ''}</div>
+      <div class="date">Stand ${dt(ref.date)} · nach ${fmt1(pf.provision * 100)} % Gebühr und ${eur(pf.versand)} Versand bleiben <b>${eur(r.netto)}</b></div>
     </div>
-    <div class="quick-calc">
-      <label>Verkäufer will €<input id="qc-price" inputmode="decimal" placeholder="Preis eingeben" value="${cur.askPrice ? n2(cur.askPrice) : ''}" /></label>
-      <div id="qc-out"></div>
-    </div>
-    <h3>Herleitung</h3>
+    ${cm && !pl.ok ? `<div class="warn">Cardmarket-Werte widersprechen sich (${pl.vals.map((v) => eur(v)).join(' · ')}). Bitte gegenprüfen und ggf. die Variante wechseln; gerechnet wird vorsichtig mit dem niedrigsten Wert.</div>` : ''}
+    <div class="quick-links">
+      <a class="btn small primary" target="_blank" rel="noopener" href="https://www.cardmarket.com/de/Pokemon/Products/Search?category=-1&searchString=${encodeURIComponent(cmExact)}">Cardmarket ↗</a>
+      <a class="btn small" target="_blank" rel="noopener" href="https://www.pricecharting.com/search-products?type=prices&q=${encodeURIComponent('pokemon ' + pcQ)}">PriceCharting ↗</a>
+      <a class="btn small" target="_blank" rel="noopener" href="https://www.ebay.de/sch/i.html?_nkw=${encodeURIComponent(cur.ebayQuery)}&LH_Sold=1&LH_Complete=1&_sop=13">eBay verkauft ↗</a>
+    </div>`;
+
+  renderBuy(r);
+
+  out.innerHTML = `
+    <h3>Rechnung</h3>
     <div class="line"><span>Ausgangspreis: ${esc(ref.label)}</span><b>${eur(ref.value)}</b></div>
-    ${ref.sources ? `<ul class="src-list">${ref.sources.map((x) => `<li><span>${esc(x.label)} <span class="meta">${new Date(x.date).toLocaleDateString('de-DE')}</span></span><b>${eur(x.eur)}</b></li>`).join('')}</ul><p class="date">Kombiniert = Median der Quellen.</p>` : ''}
-    <p class="date">${ref.dateLabel} ${dt(ref.date)}</p>
-    ${cur.myCond !== cur.refCond ? `<div class="line"><span>Zustand ${cur.myCond} statt ${cur.refCond}${ecf.fromMarket ? ' (laut echten Marktpreisen)' : ''}</span><b>× ${f2(r.zf)}</b></div>` : ''}
-    ${cur.myLang !== cur.refLang ? `<div class="line"><span>Sprache ${esc(LANG_LABELS[cur.myLang] || cur.myLang)} statt ${esc(LANG_LABELS[cur.refLang] || cur.refLang)}</span><b>× ${f2(r.sf)}</b></div>` : ''}
-    <div class="line"><span>Verkaufswert deiner Karte</span><b>${eur(r.brutto)}</b></div>
-    <div class="line"><span>Abzüglich ${fmt1(pf.provision * 100)} % Gebühr und ${eur(pf.versand)} Versand (${esc(pf.label)})</span><b class="big">${eur(r.netto)}</b></div>
+    ${ref.sources ? `<ul class="src-list">${ref.sources.map((x) => `<li><span>${esc(x.label)} <span class="meta">${new Date(x.date).toLocaleDateString('de-DE')}</span></span><b>${eur(x.eur)}</b></li>`).join('')}</ul>` : ''}
+    ${!custom && cur.myCond !== 'NM' ? `<div class="line"><span>Zustand ${cur.myCond} statt Near Mint${ecf.fromMarket ? ' (laut echten Marktpreisen)' : ''}</span><b>× ${f2(r.zf)}</b></div>` : ''}
+    ${!custom && cur.myLang !== 'en' ? `<div class="line"><span>Sprache ${esc(LANG_LABELS[cur.myLang] || cur.myLang)} statt Englisch</span><b>× ${f2(r.sf)}</b></div>` : ''}
+    <div class="line"><span>Marktwert deiner Karte</span><b>${eur(r.brutto)}</b></div>
+    <div class="line"><span>Nach ${fmt1(pf.provision * 100)} % Gebühr und ${eur(pf.versand)} Versand (${esc(pf.label)})</span><b>${eur(r.netto)}</b></div>
     <h3>Ankaufsleiter</h3>
     <table class="ladder">
       <tr><th>Ankauf bei</th><th>Höchstens zahlen</th><th>Gewinn</th><th>Rendite</th></tr>
       ${r.ladder.map((l) => `<tr class="${l.highlight ? 'hl' : ''}"><td>${Math.round(l.p * 100)} %</td><td>${eur(l.maxGebot)}</td><td>${eur(l.gewinn)}</td><td>${pct(l.rendite)}</td></tr>`).join('')}
     </table>
-    <h3>Preis je Zustand (${esc(LANG_LABELS[cur.myLang] || cur.myLang)})</h3>
-    <table class="ladder cond-table">
-      <tr><th>Zustand</th><th>Verkaufswert</th><th>Nach Kosten</th><th>Höchstens zahlen (80 %)</th></tr>
-      ${preiseJeZustand({ referenz: ref.value, cf: ecf.cf, refZustand: cur.refCond, sprachFaktor: r.sf, provision: pf.provision, versand: pf.versand })
-        .map((z) => `<tr data-cond="${z.zustand}" class="${z.zustand === cur.myCond ? 'hl' : ''}"><td>${z.zustand} <span class="meta">${CONDITION_LABELS[z.zustand] || ''}</span></td><td>${eur(z.brutto)}</td><td>${eur(z.netto)}</td><td>${eur(z.maxGebot80)}</td></tr>`).join('')}
-    </table>
-    <p class="date">Abgeleitet vom Ausgangspreis (${cur.refCond}) über ${ecf.fromMarket ? 'die echten Zustandspreise dieser Karte bei TCGplayer' : 'deine Zustandsfaktoren'}. Zeile antippen, um den Zustand deiner Karte zu wählen.</p>
-    <button class="block primary" id="to-cart">In den Ankaufskorb · ${eur(l80.maxGebot)}</button>
-    ${r.netto <= 0 ? '<div class="warn">Netto ist null oder negativ. Bei diesen Kosten lohnt sich kein Ankauf.</div>' : ''}
-    ${r.unterMindest ? `<div class="warn">Netto unter ${eur(settings.minNetto)}: Der Flip trägt sich einzeln nicht, er lohnt sich nur im Sammelversand.</div>` : ''}`;
-  const buy = $('#inv-buy');
-  if (buy && !buy.value) buy.placeholder = `z. B. ${n2(r.ladder[1].maxGebot)} (80 %)`;
-  $('#to-cart').addEventListener('click', () => addToCart(ref, r, l80));
-  const qc = () => {
-    const v = parseNum($('#qc-price').value);
-    cur.askPrice = v;
-    $('#qc-out').innerHTML = v ? verdictHtml(v, r.netto) : '<p class="date">Preis des Verkäufers eintragen, die App sagt dir, ob es sich lohnt.</p>';
-  };
-  $('#qc-price').addEventListener('input', qc);
-  qc();
-  $$('.cond-table tr[data-cond]', out).forEach((tr) =>
-    tr.addEventListener('click', () => {
-      cur.myCond = tr.dataset.cond;
-      $('#my-cond').value = cur.myCond;
-      renderMarket();
-      updateCalc();
-    }),
-  );
+    ${r.unterMindest ? `<div class="warn">Nach Kosten unter ${eur(settings.minNetto)}: einzeln verkauft lohnt sich das kaum, eher im Sammelversand.</div>` : ''}`;
 }
 
-async function saveToInventory() {
+/** Ankauf: Verkäufer-Preis → Ampel → Gegenangebot → ich zahle → gekauft / Korb. */
+function renderBuy(r) {
+  const el = $('#ev-buy');
+  if (cur.bought) {
+    el.innerHTML = `
+      <div class="bought-ok">
+        <b>Gekauft für ${eur(cur.bought.price)}</b>
+        <span class="meta">in der Sammlung gespeichert · erwarteter Gewinn ${eur(r.netto - cur.bought.price)}</span>
+      </div>
+      <label>Bezahlter Preis anpassen €<input id="bought-price" inputmode="decimal" value="${n2(cur.bought.price)}" /></label>
+      <div class="grid2" style="margin-top:10px">
+        <button class="primary" id="next-card">Nächste Karte</button>
+        <button id="bought-undo" class="danger">Kauf rückgängig</button>
+      </div>`;
+    $('#bought-price').addEventListener('change', async (e) => {
+      const v = parseNum(e.target.value);
+      if (v == null || v < 0) return toast('Ungültiger Preis');
+      const it = inventory.find((x) => x.uid === cur.bought.uid);
+      if (it) { it.einkauf = v; await db.put('inventory', it); }
+      cur.bought.price = v;
+      renderBuy(r);
+      toast('Preis angepasst');
+    });
+    $('#next-card').addEventListener('click', nextCard);
+    $('#bought-undo').addEventListener('click', async () => {
+      await db.del('inventory', cur.bought.uid);
+      inventory = inventory.filter((x) => x.uid !== cur.bought.uid);
+      cur.bought = null;
+      renderBuy(r);
+      toast('Kauf entfernt');
+    });
+    return;
+  }
+  const ask = cur.askPrice ?? null;
+  const pay = cur.payPrice ?? (ask != null ? ask : Math.floor(r.ladder[1].maxGebot * 2) / 2);
+  const cfg = flipCfg();
+  const pfo = portfolio(inventory, { start: cfg.start, marktwert: (it) => itemValue(it).value, platform: itemPlatform });
+  el.innerHTML = `
+    <h2>Ankauf</h2>
+    <label class="big-input">Verkäufer will<span class="eur-in"><input id="ask" inputmode="decimal" placeholder="Preis" value="${ask != null ? n2(ask) : ''}" /><i>€</i></span></label>
+    <div id="ask-verdict">${ask != null ? verdictHtml(ask, r.netto) : `<p class="date">Höchstens ${eur(r.ladder[1].maxGebot)} zahlen (80 % von ${eur(r.netto)} nach Kosten).</p>`}</div>
+    <div class="chip-label">Gegenangebot</div>
+    <div class="chips offer-chips">
+      ${r.ladder.map((l) => { const v = Math.floor(l.maxGebot * 2) / 2; return `<button data-pay="${v}" class="${Math.abs(v - pay) < 0.001 ? 'on' : ''} ${l.highlight ? 'rec' : ''}"><b>${eur(v)}</b><span>${Math.round(l.p * 100)} % · +${pct(l.rendite)}</span></button>`; }).join('')}
+    </div>
+    <label class="big-input">Ich zahle<span class="eur-in"><input id="pay" inputmode="decimal" value="${n2(pay)}" /><i>€</i></span></label>
+    <div id="pay-verdict" class="pay-line">${pay ? `Gewinn <b class="${r.netto - pay >= 0 ? 'pos' : 'neg'}">${eur(r.netto - pay)}</b> · Rendite <b>${pay > 0 ? pct((r.netto - pay) / pay) : '–'}</b>` : ''}</div>
+    <div class="grid2 buy-meta">
+      <label>Gekauft über<select id="buy-wo">${optsOf(WO, cur.buyWo || 'laden')}</select></label>
+      <label>Art<select id="buy-art">${optsOf(ART, cur.buyArt || (ask != null && Math.abs(pay - ask) > 0.001 ? 'vorschlag' : 'festpreis'))}</select></label>
+    </div>
+    <div class="grid2" style="margin-top:12px">
+      <button class="primary" id="buy-now">Gekauft für ${eur(pay)}</button>
+      <button id="to-cart">In den Korb</button>
+    </div>
+    ${cfg.start > 0 ? `<p class="date">Im Pott ${eur(pfo.kasse)} · danach ${eur(pfo.kasse - pay)}</p>` : ''}`;
+
+  const askIn = $('#ask'), payIn = $('#pay');
+  askIn.addEventListener('input', () => {
+    cur.askPrice = parseNum(askIn.value);
+    if (cur.payTouched !== true) cur.payPrice = cur.askPrice;
+    $('#ask-verdict').innerHTML = cur.askPrice != null ? verdictHtml(cur.askPrice, r.netto) : '';
+    if (cur.payTouched !== true && cur.askPrice != null) { payIn.value = n2(cur.askPrice); refreshPay(); }
+  });
+  const refreshPay = () => {
+    const v = parseNum(payIn.value);
+    cur.payPrice = v;
+    $('#pay-verdict').innerHTML = v ? `Gewinn <b class="${r.netto - v >= 0 ? 'pos' : 'neg'}">${eur(r.netto - v)}</b> · Rendite <b>${v > 0 ? pct((r.netto - v) / v) : '–'}</b>` : '';
+    $('#buy-now').textContent = `Gekauft für ${eur(v || 0)}`;
+    $$('.offer-chips button', el).forEach((b) => b.classList.toggle('on', Math.abs(+b.dataset.pay - (v || 0)) < 0.001));
+  };
+  payIn.addEventListener('input', () => { cur.payTouched = true; refreshPay(); });
+  $$('.offer-chips button', el).forEach((b) => b.addEventListener('click', () => { cur.payTouched = true; payIn.value = n2(+b.dataset.pay); refreshPay(); }));
+  $('#buy-wo').addEventListener('change', (e) => { cur.buyWo = e.target.value; });
+  $('#buy-art').addEventListener('change', (e) => { cur.buyArt = e.target.value; });
+  $('#buy-now').addEventListener('click', () => buyNow(parseNum(payIn.value)));
+  $('#to-cart').addEventListener('click', () => {
+    const l80 = r.ladder.find((l) => l.highlight);
+    addToCart(cur.last.ref, r, l80);
+    const v = parseNum(payIn.value);
+    const it = cart.find((x) => !x.bought && x.cardId === cur.card.id && x.zustand === cur.myCond && x.sprache === cur.myLang);
+    if (it && v != null) { it.angebot = v; saveCart(); updateCartBtn(); }
+  });
+}
+
+/** Direkt gekauft: in die Sammlung, Einkaufspreis = was ich zahle. */
+async function buyNow(price) {
+  if (price == null || price < 0) return toast('Bitte eintragen, was du zahlst');
   const c = cur.card;
   const ref = cur.last?.ref;
   const item = {
-    uid: uid(),
-    id: c.id,
-    lang: cur.lang,
-    name: c.name,
-    setName: c.set?.name || '',
-    setId: c.set?.id || setIdOf(c),
-    localId: c.localId,
-    official: c.set?.cardCount?.official ?? null,
-    image: c.image || null,
-    sprache: cur.myLang,
-    zustand: cur.myCond,
-    einkauf: parseNum($('#inv-buy').value),
-    ekWo: $('#inv-wo') ? $('#inv-wo').value : '',
-    ekArt: $('#inv-art') ? $('#inv-art').value : '',
-    datum: $('#inv-date').value || today(),
-    status: $('#inv-status').value,
-    verkauf: parseNum($('#inv-sell').value),
-    notiz: $('#inv-note').value.trim(),
-    refSprache: cur.refLang,
-    refZustand: cur.refCond,
-    // Marktwert-Basis: gewähltes Cardmarket-Feld, sonst trend; manuelle Referenz als Rückfall.
+    uid: uid(), id: c.id, lang: cur.lang, name: c.name, setName: c.set?.name || '', setId: c.set?.id || setIdOf(c),
+    localId: c.localId, official: c.set?.cardCount?.official ?? null, image: c.image || null,
+    sprache: cur.myLang, zustand: cur.myCond, variante: cur.useHolo ? 'reverse' : 'standard',
+    einkauf: price, datum: today(), status: 'bestand', verkauf: null, notiz: cur.askPrice != null && Math.abs(cur.askPrice - price) > 0.001 ? `Verkäufer wollte ${eur(cur.askPrice)}` : '',
+    ekWo: cur.buyWo || 'laden', ekArt: cur.buyArt || (cur.askPrice != null && Math.abs(price - cur.askPrice) > 0.001 ? 'vorschlag' : 'festpreis'),
+    refSprache: cur.refType === 'custom' ? cur.myLang : 'en', refZustand: cur.refType === 'custom' ? cur.myCond : 'NM',
     marketField: ref?.isApi ? ref.field : cur.useHolo ? 'trend-holo' : 'trend',
     manualRef: ref && !ref.isApi ? { value: ref.value, date: ref.date, label: ref.label } : null,
-    pricing: cur.pricing,
-    fetchedAt: cur.fetchedAt,
-    offers: cur.offers.map((o) => ({ v: o.v, on: o.on, src: o.src })),
+    pricing: cur.pricing, fetchedAt: cur.fetchedAt, offers: [],
     grading: cur.grading || null,
     gradedApi: cur.gradedApi && cur.gradedApi.status === 'ok' ? { data: cur.gradedApi.data, fetchedAt: cur.gradedApi.fetchedAt } : null,
     graded: cur.graded && Object.keys(cur.graded).length ? cur.graded : null,
@@ -1417,7 +1422,20 @@ async function saveToInventory() {
   };
   await db.put('inventory', item);
   inventory = await db.all('inventory');
-  toast('Zur Sammlung hinzugefügt');
+  cur.bought = { uid: item.uid, price };
+  if (navigator.vibrate) navigator.vibrate(30);
+  updateCalc();
+}
+
+/** Zurück zur Suche, Eingabe leeren und fokussieren – für die nächste Karte im Laden. */
+function nextCard() {
+  show('search');
+  const q = $('#q-name');
+  q.value = '';
+  $('#results').innerHTML = '';
+  setStatus('');
+  setMode('name');
+  setTimeout(() => q.focus(), 50);
 }
 
 // ---------- Rechner ----------
