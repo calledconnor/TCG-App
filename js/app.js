@@ -759,18 +759,20 @@ function renderGradedApi() {
   const raw = d.rawMarketUsd;
   const est = cur.grading ? cur.grading.overall : null;
   const row = (g) => {
-    const price = g.smart ?? g.median ?? g.avg;
+    const price = g.median ?? g.avg; // Median: robust gegen Ausreißer (der „Smart Price“ der API schwankt teils stark)
     const mult = raw && price ? price / raw : null;
     const hl = g.company === 'PSA' && est != null && +g.grade === est;
-    return `<tr class="${hl ? 'hl' : ''}"><td>${g.company} ${esc(g.grade)}</td><td>${money(price)}${g.min != null && g.max != null ? `<div class="range">${money(g.min)} – ${money(g.max)}</div>` : ''}</td><td>${g.count ?? '–'}</td><td>${mult ? '× ' + mult.toLocaleString('de-DE', { maximumFractionDigits: 1 }) : '–'}</td></tr>`;
+    const tr = { up: ' <span class="pos" title="steigend">↑</span>', down: ' <span class="neg" title="fallend">↓</span>', stable: ' <span class="meta" title="stabil">→</span>' }[g.trend] || '';
+    const few = (g.count ?? 0) < 3;
+    return `<tr class="${hl ? 'hl' : ''}${few ? ' few' : ''}" title="${few ? 'weniger als 3 Verkäufe – wenig aussagekräftig' : ''}"><td>${g.company} ${esc(g.grade)}${tr}</td><td>${money(price)}${g.min != null && g.max != null ? `<div class="range">${money(g.min)} – ${money(g.max)}</div>` : ''}</td><td>${g.count ?? '–'}</td><td>${mult ? '× ' + mult.toLocaleString('de-DE', { maximumFractionDigits: 1 }) : '–'}</td></tr>`;
   };
   const psa = d.grades.filter((g) => g.company === 'PSA');
   const other = d.grades.filter((g) => g.company !== 'PSA');
   const head = '<tr><th>Note</th><th>Marktpreis</th><th>Verkäufe</th><th>Faktor</th></tr>';
   el.innerHTML = d.grades.length
     ? `<table class="ladder">${head}${psa.map(row).join('')}</table>
-       ${other.length ? `<details class="more"><summary>Weitere Grader (CGC, BGS, SGC)</summary><table class="ladder">${head}${other.map(row).join('')}</table></details>` : ''}
-       <p class="date">Ungegradet: <b>${money(raw)}</b> (TCGplayer). Faktor = gegradeter Preis ÷ ungegradeter Preis.${est != null ? ' Deine Schätzung PSA ' + est + ' ist markiert.' : ''}</p>
+       ${other.length ? `<details class="more"><summary>Weitere Grader (CGC, BGS, SGC …)</summary><table class="ladder">${head}${other.map(row).join('')}</table></details>` : ''}
+       <p class="date">Ungegradet: <b>${money(raw)}</b> (TCGplayer). Marktpreis = Median der Verkäufe, darunter die Spanne; Pfeil = Preistrend, blass = unter 3 Verkäufen (wenig aussagekräftig). Faktor = gegradeter ÷ ungegradeter Preis.${est != null ? ' Deine Schätzung PSA ' + est + ' ist markiert.' : ''}</p>
        <p class="date">Verkäufe auf eBay und Fanatics Collect${d.from && d.to ? ` vom ${new Date(d.from).toLocaleDateString('de-DE')} bis ${new Date(d.to).toLocaleDateString('de-DE')}` : ''}, über Pokemon Price Tracker. Abgerufen am ${dt(r.fetchedAt)}.</p>
        ${btn}`
     : `<p class="hint">Für diese Karte wurden keine Verkäufe gegradeter Exemplare gefunden.</p>${btn}`;
