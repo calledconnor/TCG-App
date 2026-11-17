@@ -69,9 +69,15 @@ TCGdex/Cardmarket-Preisindex hat **keine** getrennten Preise pro Zustand. Die Be
 
 Speichert Bild-URL, TCGdex-ID, Name, Set, Sprache, Zustand, Einkauf, Datum, Status, Verkauf, Notiz sowie den Preis-Snapshot mit Abrufdatum. Marktwert = Cardmarket-Feld (Standard `trend`) × Faktoren. Preise älter als 24 h werden beim Öffnen der App und alle 30 Minuten, solange sie offen ist, nachgeladen. Echte Hintergrund-Aktualisierung bei geschlossener App erlauben Browser für Web-Apps nicht zuverlässig. CSV-Export (Semikolon, Dezimalkomma, UTF-8 mit BOM für Excel) und JSON-Backup.
 
+## Grading-Check
+
+Eigener Reiter „Grading“: Foto vorne/hinten, automatische Erkennung von Außenkante und Innenrahmen (Startwerte), danach verschiebbare Linien mit Lupe. Zentrierung links/rechts und oben/unten in Prozent, Obergrenze nach PSA-Richtlinie (PSA 10 ≤ 60/40 vorne, ≤ 75/25 hinten; PSA 9 ≤ 65/35 und ≤ 90/10; …). Mängel per Antippen markieren (Oberfläche/Ecke/Kante, Art, leicht/mittel/stark, Notiz), Kantenfilter für Kratzer. Teilnoten automatisch (10 minus Abzüge 0,5/1,5/3), überschreibbar. Gesamtschätzung = niedrigste Teilnote, gedeckelt durch Zentrierung. Kein offizielles Grading.
+
+Graded-Preise: eBay-Deep-Link „verkauft“ mit Note (PSA 10, 9, … BGS, CGC), Preise je Note von Hand mit Median. Eine Graded-Preis-API ist nicht eingebunden (keine kostenlose ohne Anmeldung).
+
 ## Nicht enthalten
 
-Bewusst weggelassen: Nutzerkonten, Marktplatz, Preisprognosen, Push-Benachrichtigungen, Bewertung gegradeter Karten, eBay-/Cardmarket-Abrufe. Der optionale Supabase-Sync ist nicht gebaut; alle Daten bleiben lokal auf dem Gerät (Backup per JSON).
+Bewusst weggelassen: Nutzerkonten, Marktplatz, Preisprognosen, Push-Benachrichtigungen, eBay-/Cardmarket-Abrufe. Der optionale Supabase-Sync ist nicht gebaut; alle Daten bleiben lokal auf dem Gerät (Backup per JSON).
 
 ## Struktur
 

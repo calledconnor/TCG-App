@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Pokémon-Sammelkarten für den Wiederverkauf bewerten (statische SPA)",
+  "description": "Pok\u00e9mon-Sammelkarten f\u00fcr den Wiederverkauf bewerten (statische SPA)",
   "scripts": {
     "start": "python3 -m http.server 8080",
-    "test": "node --test tests/calc.test.mjs"
+    "test": "node --test tests/calc.test.mjs tests/grading.test.mjs"
   }
 }

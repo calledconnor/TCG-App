@@ -7,6 +7,7 @@ import {
   getCard, extractPricing, englishName, setIdOf, getSets, usdEur, searchSmart,
 } from './api.js';
 import { db, kvGet, kvSet } from './db.js';
+import { createGrading } from './grading.js';
 
 // ---------- Helfer ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -15,6 +16,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const fmtEur = new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' });
 const eur = (v) => (v == null || !Number.isFinite(v) ? '–' : fmtEur.format(v));
 const n2 = (v) => (v == null || !Number.isFinite(v) ? '–' : v.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+const fmt1 = (v) => (v == null ? '–' : v.toLocaleString('de-DE', { maximumFractionDigits: 1 }));
 const pct = (v) => (v == null || !Number.isFinite(v) ? '–' : (v * 100).toLocaleString('de-DE', { maximumFractionDigits: 1 }) + ' %');
 const dt = (v) => {
   if (!v) return 'unbekannt';
@@ -75,6 +77,7 @@ function show(view, { push = true, keepScroll = true } = {}) {
   $$('.tabbar button').forEach((b) => b.classList.toggle('on', b.dataset.view === view));
   if (view === 'inv') renderInventory();
   if (view === 'settings') renderSettings();
+  if (view === 'grade') grading && grading.refresh();
   const changed = view !== curView;
   curView = view;
   if (changed) scroller.scrollTop = keepScroll ? scrollMem[view] || 0 : 0;
@@ -332,6 +335,9 @@ async function openCard(lang, id) {
       myLang, myLangUnmapped: !tcgLangToLf(settings.searchLang) && !tcgLangToLf(lang),
       myCond: prev ? prev.myCond : 'NM',
       platform: settings.platform,
+      grading: prev && prev.card.id === card.id ? prev.grading : null,
+      graded: prev && prev.card.id === card.id ? prev.graded : {},
+      gpGrade: prev && prev.card.id === card.id ? prev.gpGrade : 'PSA 10',
     };
     cur.ebayQuery = `${card.name} ${card.localId}/${card.set?.cardCount?.official ?? ''}`.trim();
     renderEval();
@@ -469,6 +475,18 @@ function renderEval() {
     </div>
 
     <div class="card">
+      <h2>Grading &amp; Graded-Preise</h2>
+      <div id="grading-sum"></div>
+      <h3>Verkaufspreise gegradeter Karten</h3>
+      <div class="grid2">
+        <select id="gp-grade">${GRADES.map((g) => `<option ${g === cur.gpGrade ? 'selected' : ''}>${g}</option>`).join('')}</select>
+        <div class="inline"><input id="gp-one" inputmode="decimal" placeholder="Preis €" /><button id="gp-add" class="primary">+</button></div>
+      </div>
+      <a id="gp-ebay" class="btn block" target="_blank" rel="noopener" href="#">eBay: verkaufte Karten mit dieser Note</a>
+      <div id="gp-list"></div>
+    </div>
+
+    <div class="card">
       <h2>Zum Bestand hinzufügen</h2>
       <div class="grid2">
         <label>Einkaufspreis €<input id="inv-buy" inputmode="decimal" placeholder="z. B. 20" /></label>
@@ -548,6 +566,64 @@ function renderEval() {
   renderMarket();
   renderLinks();
   renderOffers();
+  renderGradingSum();
+  renderGraded();
+  $('#gp-grade').addEventListener('change', (e) => {
+    cur.gpGrade = e.target.value;
+    cur.gpTouched = true;
+    renderGraded();
+  });
+  $('#gp-add').addEventListener('click', () => {
+    const v = parseNum($('#gp-one').value);
+    if (v == null || v <= 0) return toast('Bitte einen Preis eingeben');
+    (cur.graded[cur.gpGrade] ||= []).push(v);
+    $('#gp-one').value = '';
+    renderGraded();
+  });
+}
+
+const GRADES = ['PSA 10', 'PSA 9', 'PSA 8', 'PSA 7', 'BGS 9.5', 'BGS 9', 'CGC 10', 'CGC 9.5', 'CGC 9'];
+
+function renderGradingSum() {
+  const el = $('#grading-sum');
+  if (!el) return;
+  const g = cur.grading;
+  el.innerHTML = g
+    ? `<div class="line" style="display:flex;justify-content:space-between;align-items:center;padding:4px 0 10px">
+         <span class="grade-badge">PSA ~${g.overall} geschätzt</span>
+         <span class="meta">${dt(g.date)}</span>
+       </div>
+       <div class="meta">Zentrierung max. ${g.cap}${g.centering.front ? ` (vorne ${fmt1(g.centering.front.lr)}/${fmt1(100 - g.centering.front.lr)}, ${fmt1(g.centering.front.tb)}/${fmt1(100 - g.centering.front.tb)})` : ''} · Ecken ${fmt1(g.sub.corners)} · Kanten ${fmt1(g.sub.edges)} · Oberfläche ${fmt1(g.sub.surface)} · ${g.defects.length} Mängel</div>
+       ${g.photos.front || g.photos.back ? `<div class="g-photos">${g.photos.front ? `<img src="${g.photos.front}" alt="vorne">` : ''}${g.photos.back ? `<img src="${g.photos.back}" alt="hinten">` : ''}</div>` : ''}
+       <button class="block" id="go-grade">Grading-Check bearbeiten</button>`
+    : `<p class="hint">Noch kein Grading-Check für diese Karte.</p><button class="block" id="go-grade">Grading-Check starten</button>`;
+  $('#go-grade').addEventListener('click', () => show('grade'));
+  if (g) {
+    const opt = $('#gp-grade');
+    const want = `PSA ${g.overall}`;
+    if (!cur.gpTouched && GRADES.includes(want)) {
+      cur.gpGrade = want;
+      opt.value = want;
+    }
+  }
+}
+
+function renderGraded() {
+  const el = $('#gp-list');
+  if (!el) return;
+  const c = cur.card;
+  const nm = cur.enName?.name || c.name;
+  const q = `${nm} ${c.localId}${c.set?.cardCount?.official ? '/' + c.set.cardCount.official : ''} ${cur.gpGrade}`;
+  $('#gp-ebay').href = `https://www.ebay.de/sch/i.html?_nkw=${encodeURIComponent(q)}&LH_Sold=1&LH_Complete=1&_sop=13`;
+  $('#gp-ebay').textContent = `eBay: verkaufte „${cur.gpGrade}“ ansehen`;
+  const rows = GRADES.filter((g) => (cur.graded[g] || []).length).map((g) => {
+    const s = stats(cur.graded[g]);
+    return `<tr><td>${g}</td><td>${s.count}</td><td>${eur(s.median)}</td><td>${eur(s.min)}–${eur(s.max)}</td><td><button class="ghost small danger" data-clear="${g}">×</button></td></tr>`;
+  });
+  el.innerHTML = rows.length
+    ? `<table><tr><th>Note</th><th>Anzahl</th><th>Median</th><th>Spanne</th><th></th></tr>${rows.join('')}</table><p class="date">Von Hand eingetragen am ${dt(Date.now())}.</p>`
+    : '<p class="hint">Note wählen, eBay-Verkäufe ansehen und die Preise hier eintragen.</p>';
+  $$('[data-clear]', el).forEach((b) => b.addEventListener('click', () => { delete cur.graded[b.dataset.clear]; renderGraded(); }));
 }
 
 /** Marktpreise mit Zustandsleiste: alle Werte über CF[Zustand] / CF[Referenzzustand] umgerechnet. */
@@ -770,6 +846,8 @@ async function saveToInventory() {
     manualRef: ref && !ref.isApi ? { value: ref.value, date: ref.date, label: ref.label } : null,
     pricing: cur.pricing,
     fetchedAt: cur.fetchedAt,
+    grading: cur.grading || null,
+    graded: cur.graded && Object.keys(cur.graded).length ? cur.graded : null,
     createdAt: Date.now(),
   };
   await db.put('inventory', item);
@@ -860,6 +938,7 @@ function invItemHtml(it) {
       <div class="meta"><span class="tag">${statusLbl}</span> Einkauf ${eur(it.einkauf)} · ${esc(it.datum)}${it.status === 'verkauft' ? ` · Verkauf ${eur(it.verkauf)}` : ''}</div>
       ${v.ref != null ? `<div class="date">Referenz ${eur(v.ref)} · ${esc(v.src)} · Preisstand ${dt(v.date)}</div>` : '<div class="date">Kein Preis vorhanden</div>'}
       <div class="date">Abgerufen ${dt(it.fetchedAt)}</div>
+      ${it.grading ? `<div class="meta"><span class="grade-badge">PSA ~${it.grading.overall} geschätzt</span></div>` : ''}
       ${it.notiz ? `<div class="meta">${esc(it.notiz)}</div>` : ''}
     </div>
     <div class="right">
@@ -1095,11 +1174,29 @@ async function loadFx() {
   }
 }
 
+// ---------- Grading ----------
+let grading = null;
+function initGrading() {
+  grading = createGrading({
+    root: $('#grade'),
+    getCard: () => (cur ? cur.card : null),
+    toast,
+    onApply: (res) => {
+      cur.grading = res;
+      toast(`Grading übernommen: PSA ~${res.overall}`);
+      show('eval');
+      renderGradingSum();
+      renderGraded();
+    },
+  });
+}
+
 // ---------- Start ----------
 (async function init() {
   updateNet();
   await loadSettings();
   renderLangSelect();
+  initGrading();
   try { inventory = await db.all('inventory'); } catch { inventory = []; }
   refreshState.last = await kvGet('lastRefresh', null);
   probeLanguages()

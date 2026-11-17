@@ -221,7 +221,7 @@ tr:last-child td { border-bottom: 0; }
 
 .tabbar {
   flex: none; z-index: 10;
-  display: grid; grid-template-columns: repeat(4, 1fr);
+  display: grid; grid-template-columns: repeat(5, 1fr);
   background: var(--bg);
   border-top: 1px solid var(--line);
   padding-bottom: env(safe-area-inset-bottom);
@@ -244,3 +244,18 @@ code { font-size: 12px; background: var(--sunken); padding: 1px 6px; border-radi
 .back { margin: 0 0 4px; min-height: 36px; }
 .cond-seg { gap: 0; justify-content: space-between; margin-top: 0; }
 .cond-seg button { flex: 1; text-align: center; padding: 0 0 10px; font-variant-numeric: tabular-nums; }
+
+/* Grading */
+.g-stage { margin-top: 10px; }
+#g-canvas { width: 100%; touch-action: none; border-radius: 10px; background: #000; display: block; }
+.g-tools { flex-wrap: wrap; margin-top: 6px; }
+.g-def { display: grid; grid-template-columns: 28px 1fr auto; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--line); align-items: start; }
+.g-def.sel .g-num { background: var(--strong); color: var(--on-strong); }
+.g-num { width: 26px; height: 26px; border-radius: 50%; background: var(--sunken); display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; margin-top: 10px; }
+.g-def-body { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.g-sev { margin: 0; gap: 16px; }
+.g-sev button { min-height: 32px; font-size: 13px; }
+.grade-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; background: var(--strong); color: var(--on-strong); }
+.g-photos { display: flex; gap: 8px; margin-top: 10px; }
+.g-photos img { height: 120px; border-radius: 6px; }
+.tabbar button { padding: 0 2px; font-size: 12px; min-width: 0; }
