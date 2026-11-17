@@ -85,3 +85,14 @@ test('preiseJeZustand: NM-Referenz 100 € -> PO 22 €, inkl. Sprachfaktor', as
   close(lp.brutto, 28.35);
   assert.equal(rows.length, 7);
 });
+
+test('parseCardNumberLoose: Schrägstrich als 7 gelesen', async () => {
+  const { parseCardNumberLoose } = await import('../js/calc.js');
+  const totals = new Set([165, 102, 99, 189]);
+  const ok = (n) => totals.has(n);
+  assert.deepEqual(parseCardNumberLoose('TR 0067165\nG77', ok), { number: '006', total: '165' });
+  assert.deepEqual(parseCardNumberLoose('0191189', ok), { number: '019', total: '189' });
+  assert.deepEqual(parseCardNumberLoose('97/99', ok), { number: '97', total: '99' });
+  assert.equal(parseCardNumberLoose('0067165', null), null);
+  assert.equal(parseCardNumberLoose('1234567', ok), null);
+});

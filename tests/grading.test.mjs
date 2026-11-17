@@ -28,3 +28,14 @@ test('Teilnoten und Gesamtnote', () => {
   assert.equal(overallGrade({ cap: 10, corners: 8, edges: 10, surface: 9.5 }), 8);
   assert.equal(overallGrade({ cap: 7, corners: 10, edges: 10, surface: 10 }), 7);
 });
+
+test('Homographie bildet Ecken exakt ab', async () => {
+  const { homography, applyH } = await import('../js/grading.js');
+  const src = [[0, 0], [100, 0], [100, 140], [0, 140]];
+  const dst = [[12, 8], [118, 15], [110, 160], [5, 150]];
+  const H = homography(src, dst);
+  for (let i = 0; i < 4; i++) {
+    const [u, v] = applyH(H, ...src[i]);
+    assert.ok(Math.abs(u - dst[i][0]) < 1e-6 && Math.abs(v - dst[i][1]) < 1e-6);
+  }
+});

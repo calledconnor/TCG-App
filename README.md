@@ -41,6 +41,14 @@ Für den Notfall liegt in `proxy/cloudflare-worker.js` ein Minimal-Proxy (nur GE
   - eBay verkauft: `https://www.ebay.de/sch/i.html?_nkw={suche}&LH_Sold=1&LH_Complete=1&_sop=13`, Suchbegriff editierbar.
 - Gesehene Preise werden von Hand eingetragen oder als Text eingefügt („12,50 € 13,00 € …“).
 
+## Navigation
+
+Zurück-Pfeil oben links, „‹ Zurück“ in der Bewertung, Browser-Zurück und Wischen vom linken Bildschirmrand (wichtig in der Home-Bildschirm-App, die keine Safari-Geste hat).
+
+## Live-Scanner
+
+Suchen → Kamera → „Live-Scanner starten“: Kamerabild mit Kartenrahmen. Die App misst laufend Schärfe (Laplace-Varianz) und Bewegung im Nummernstreifen; ist das Bild scharf und ruhig, liest sie den Streifen per OCR. Zwei gleiche Lesungen = Treffer, dann startet die Nummernsuche automatisch. Wird der Schrägstrich als „7“/„1“ gelesen („0067165“), probiert die App die Trennstellen durch und akzeptiert nur Gesamtzahlen, die es als Set bei TCGdex gibt. Licht-Schalter, wenn das Gerät eine Taschenlampe anbietet. Alternativ „Foto aufnehmen“ oder „Aus Galerie“.
+
 ## Kamera-Eingabe
 
 Foto → Ausschnitt der Unterkante bestätigen → OCR (Tesseract.js, **lokal in `vendor/` eingebunden**, funktioniert offline) → Nummer und Gesamtzahl werden zum Korrigieren angezeigt → Suche nach `localId`, gefiltert auf Sets mit passender Gesamtzahl (`cardCount.official` oder `total`). Erkennt die OCR nichts, springt die App zur Namenssuche.
@@ -71,7 +79,9 @@ Speichert Bild-URL, TCGdex-ID, Name, Set, Sprache, Zustand, Einkauf, Datum, Stat
 
 ## Grading-Check
 
-Eigener Reiter „Grading“: Foto vorne/hinten, automatische Erkennung von Außenkante und Innenrahmen (Startwerte), danach verschiebbare Linien mit Lupe. Zentrierung links/rechts und oben/unten in Prozent, Obergrenze nach PSA-Richtlinie (PSA 10 ≤ 60/40 vorne, ≤ 75/25 hinten; PSA 9 ≤ 65/35 und ≤ 90/10; …). Mängel per Antippen markieren (Oberfläche/Ecke/Kante, Art, leicht/mittel/stark, Notiz), Kantenfilter für Kratzer. Teilnoten automatisch (10 minus Abzüge 0,5/1,5/3), überschreibbar. Gesamtschätzung = niedrigste Teilnote, gedeckelt durch Zentrierung. Kein offizielles Grading.
+Eigener Reiter „Grading“: Foto vorne/hinten per Kamera oder aus der Galerie. Schritt „Begradigen“: die vier Kartenecken werden erkannt (Hintergrund-Maske, je Seite eine Ausgleichsgerade, Ecken = Schnittpunkte, klappt auch mit runden Ecken), lassen sich mit Lupe nachziehen, dann wird das Foto perspektivisch entzerrt (Homographie) und mit 4 % Rand gerade hingelegt. Test: schräg fotografierte Karte (9° gedreht, geschert) mit Soll 60/40 und 45/55 gemessen als 59,8/40,2 und 45/55. Danach automatische Erkennung von Außenkante und Innenrahmen (Startwerte), danach verschiebbare Linien mit Lupe. Zentrierung links/rechts und oben/unten in Prozent, Obergrenze nach PSA-Richtlinie (PSA 10 ≤ 60/40 vorne, ≤ 75/25 hinten; PSA 9 ≤ 65/35 und ≤ 90/10; …). Mängel per Antippen markieren (Oberfläche/Ecke/Kante, Art, leicht/mittel/stark, Notiz), Kantenfilter für Kratzer. Teilnoten automatisch (10 minus Abzüge 0,5/1,5/3), überschreibbar. Gesamtschätzung = niedrigste Teilnote, gedeckelt durch Zentrierung. Kein offizielles Grading.
+
+Dokumentation: Fotos werden mit Messlinien und nummerierten Mängeln gespeichert; „Bericht teilen“ erzeugt ein PNG (Note, Teilnoten, Zentrierung, Fotos, Mängelliste) für das Teilen-Menü bzw. als Download. Im Bestand steht die Dokumentation bei der Karte.
 
 Graded-Preise: eBay-Deep-Link „verkauft“ mit Note (PSA 10, 9, … BGS, CGC), Preise je Note von Hand mit Median. Eine Graded-Preis-API ist nicht eingebunden (keine kostenlose ohne Anmeldung).
 

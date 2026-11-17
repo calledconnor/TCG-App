@@ -1,13 +1,14 @@
 import {
   DEFAULT_SETTINGS, CONDITION_LABELS, LANG_LABELS, LADDER,
-  stats, evaluate, marktwert, parsePrices, parseCardNumber, preiseJeZustand,
+  stats, evaluate, marktwert, parsePrices, parseCardNumber, parseCardNumberLoose, preiseJeZustand,
 } from './calc.js';
 import {
   ALL_LANGS, setApiBase, probeLanguages, searchByName, searchByNumber,
   getCard, extractPricing, englishName, setIdOf, getSets, usdEur, searchSmart,
 } from './api.js';
 import { db, kvGet, kvSet } from './db.js';
-import { createGrading } from './grading.js';
+import { createGrading, shareReport } from './grading.js';
+import { createScanner } from './scanner.js';
 
 // ---------- Helfer ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -71,8 +72,10 @@ const saveSettings = () => kvSet('settings', settings);
 const scroller = $('main');
 const scrollMem = {};
 let curView = 'search';
+let navDepth = 0; // Anzahl eigener History-Einträge
 function show(view, { push = true, keepScroll = true } = {}) {
   if (view !== curView) scrollMem[curView] = scroller.scrollTop;
+  if (view !== 'search' && scanner && scanner.running) stopScanner();
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + view));
   $$('.tabbar button').forEach((b) => b.classList.toggle('on', b.dataset.view === view));
   if (view === 'inv') renderInventory();
@@ -81,10 +84,37 @@ function show(view, { push = true, keepScroll = true } = {}) {
   const changed = view !== curView;
   curView = view;
   if (changed) scroller.scrollTop = keepScroll ? scrollMem[view] || 0 : 0;
-  if (push && changed) history.pushState({ view }, '', '#' + view);
+  if (push && changed) {
+    history.pushState({ view }, '', '#' + view);
+    navDepth++;
+  }
+  $('#nav-back').classList.toggle('hidden', view === 'search' && navDepth === 0);
 }
+function goBack() {
+  if (navDepth > 0) history.back();
+  else show('search', { push: false });
+}
+$('#nav-back').addEventListener('click', goBack);
+// Wischen vom linken Rand nach rechts = zurück (auch in der Home-Bildschirm-App ohne Safari-Geste)
+(() => {
+  let sx = 0, sy = 0, tracking = false;
+  addEventListener('touchstart', (e) => {
+    const t = e.touches[0];
+    tracking = e.touches.length === 1 && t.clientX < 28 && !e.target.closest('canvas,video');
+    sx = t.clientX; sy = t.clientY;
+  }, { passive: true });
+  addEventListener('touchend', (e) => {
+    if (!tracking) return;
+    tracking = false;
+    const t = e.changedTouches[0];
+    if (t.clientX - sx > 70 && Math.abs(t.clientY - sy) < 60) goBack();
+  }, { passive: true });
+})();
 $$('.tabbar button').forEach((b) => b.addEventListener('click', () => show(b.dataset.view)));
-addEventListener('popstate', (e) => show((e.state && e.state.view) || 'search', { push: false }));
+addEventListener('popstate', (e) => {
+  navDepth = Math.max(0, navDepth - 1);
+  show((e.state && e.state.view) || 'search', { push: false });
+});
 history.replaceState({ view: 'search' }, '', location.pathname + location.search);
 
 function updateNet() {
@@ -114,6 +144,7 @@ $$('#search-mode button').forEach((b) =>
 function setMode(mode) {
   $$('#search-mode button').forEach((x) => x.classList.toggle('on', x.dataset.mode === mode));
   $$('.mode-pane').forEach((p) => p.classList.toggle('hidden', p.dataset.pane !== mode));
+  if (mode !== 'camera' && scanner && scanner.running) stopScanner();
 }
 
 function setStatus(msg, err = false) {
@@ -198,7 +229,7 @@ async function runNumberSearch(number, total) {
 const crop = { img: null, rect: { x: 0, y: 0.86, w: 1, h: 0.14 }, drag: null };
 const cv = $('#crop-canvas');
 
-$('#cam-input').addEventListener('change', (e) => {
+function onPhotoPicked(e) {
   const f = e.target.files && e.target.files[0];
   if (!f) return;
   const url = URL.createObjectURL(f);
@@ -213,7 +244,80 @@ $('#cam-input').addEventListener('change', (e) => {
   im.onerror = () => toast('Bild konnte nicht geladen werden');
   im.src = url;
   e.target.value = '';
+}
+$('#cam-input').addEventListener('change', onPhotoPicked);
+$('#gal-input').addEventListener('change', onPhotoPicked);
+
+// ---------- Live-Scanner ----------
+let scanner = null;
+function scanStatus(msg, kind) {
+  const el = $('#scan-status');
+  el.textContent = msg;
+  el.className = 'status' + (kind ? ' ' + kind : '');
+}
+function stopScanner() {
+  if (scanner) scanner.stop();
+  $('#scan-live').classList.add('hidden');
+  $('#scan-start').classList.remove('hidden');
+}
+let setTotals = new Set();
+async function loadSetTotals() {
+  try {
+    const sets = await getSets(settings.searchLang);
+    setTotals = new Set();
+    for (const st of Object.values(sets)) {
+      if (st.cardCount?.official) setTotals.add(st.cardCount.official);
+      if (st.cardCount?.total) setTotals.add(st.cardCount.total);
+    }
+  } catch {}
+}
+$('#scan-start').addEventListener('click', async () => {
+  loadSetTotals();
+  $('#scan-live').classList.remove('hidden');
+  $('#scan-start').classList.add('hidden');
+  $('#crop-wrap').classList.add('hidden');
+  try {
+    const { recognize } = await import('./ocr.js');
+    scanner = scanner || createScanner({
+      wrap: $('#scan-wrap'),
+      video: $('#scan-video'),
+      frame: $('#scan-frame'),
+      onStatus: scanStatus,
+      recognize: (c) => recognize(c),
+      isValidTotal: (n) => setTotals.has(n),
+      onResult: (p) => {
+        $('#scan-live').classList.add('hidden');
+        $('#scan-start').classList.remove('hidden');
+        $('#scan-start').textContent = 'Nächste Karte scannen';
+        const out = $('#ocr-result');
+        out.classList.remove('hidden');
+        out.innerHTML = `
+          <p class="hint">Erkannt: ${esc(p.number)}/${esc(p.total)}</p>
+          <form id="ocr-form" class="inline">
+            <input id="ocr-num" value="${esc(p.number)}" /><span class="slash">/</span>
+            <input id="ocr-total" value="${esc(p.total)}" />
+            <button class="primary" type="submit">Suchen</button>
+          </form>`;
+        $('#ocr-form').addEventListener('submit', (ev) => {
+          ev.preventDefault();
+          runNumberSearch($('#ocr-num').value, $('#ocr-total').value);
+        });
+        runNumberSearch(p.number, p.total);
+      },
+    });
+    await scanner.start();
+    $('#scan-torch').classList.toggle('hidden', !scanner.torchSupported());
+  } catch (err) {
+    stopScanner();
+    toast('Kamera nicht verfügbar: ' + (err.message || err.name) + '. Nutze „Foto aufnehmen“.');
+  }
 });
+$('#scan-stop').addEventListener('click', stopScanner);
+$('#scan-torch').addEventListener('click', async () => {
+  const on = await scanner.toggleTorch();
+  $('#scan-torch').classList.toggle('primary', on);
+});
+document.addEventListener('visibilitychange', () => { if (document.hidden && scanner && scanner.running) stopScanner(); });
 
 function drawCrop() {
   const im = crop.img;
@@ -280,7 +384,8 @@ $('#crop-ok').addEventListener('click', async () => {
   try {
     const { recognize } = await import('./ocr.js');
     const text = await recognize(c, (s) => (out.innerHTML = `<p class="status">${esc(s)}</p>`));
-    const parsed = parseCardNumber(text);
+    await loadSetTotals();
+    const parsed = parseCardNumberLoose(text, (n) => setTotals.has(n));
     if (!parsed) {
       out.innerHTML = `<p class="status err">Keine Nummer erkannt${text.trim() ? ` (gelesen: „${esc(text.trim())}“)` : ''}. Ausschnitt enger ziehen oder per Name suchen.</p>`;
       setMode('name');
@@ -501,7 +606,7 @@ function renderEval() {
     </div>`;
 
   $('#reload-card').addEventListener('click', () => openCard(cur.lang, cur.card.id));
-  $('#back-btn').addEventListener('click', () => (history.length > 1 ? history.back() : show('search')));
+  $('#back-btn').addEventListener('click', goBack);
   $('#ref-holo').value = cur.useHolo ? '1' : '0';
   const bind = (sel, key, conv = (v) => v) =>
     $(sel).addEventListener('input', (e) => {
@@ -594,7 +699,7 @@ function renderGradingSum() {
          <span class="meta">${dt(g.date)}</span>
        </div>
        <div class="meta">Zentrierung max. ${g.cap}${g.centering.front ? ` (vorne ${fmt1(g.centering.front.lr)}/${fmt1(100 - g.centering.front.lr)}, ${fmt1(g.centering.front.tb)}/${fmt1(100 - g.centering.front.tb)})` : ''} · Ecken ${fmt1(g.sub.corners)} · Kanten ${fmt1(g.sub.edges)} · Oberfläche ${fmt1(g.sub.surface)} · ${g.defects.length} Mängel</div>
-       ${g.photos.front || g.photos.back ? `<div class="g-photos">${g.photos.front ? `<img src="${g.photos.front}" alt="vorne">` : ''}${g.photos.back ? `<img src="${g.photos.back}" alt="hinten">` : ''}</div>` : ''}
+       ${(() => { const ph = g.annotated || g.photos; return ph.front || ph.back ? `<div class="g-photos">${ph.front ? `<img src="${ph.front}" alt="vorne">` : ''}${ph.back ? `<img src="${ph.back}" alt="hinten">` : ''}</div>` : ''; })()}
        <button class="block" id="go-grade">Grading-Check bearbeiten</button>`
     : `<p class="hint">Noch kein Grading-Check für diese Karte.</p><button class="block" id="go-grade">Grading-Check starten</button>`;
   $('#go-grade').addEventListener('click', () => show('grade'));
@@ -960,11 +1065,31 @@ function invItemHtml(it) {
         <label>Sprache<select data-k="sprache">${Object.keys(settings.lf).map((k) => `<option value="${k}" ${k === it.sprache ? 'selected' : ''}>${LANG_LABELS[k] || k}</option>`).join('')}</select></label>
       </div>
       <label>Notiz<input data-k="notiz" value="${esc(it.notiz)}" /></label>
+      ${it.grading ? gradingDocHtml(it.grading) : ''}
       <div class="grid2" style="margin-top:8px">
         <button data-act="open">Neu bewerten</button>
         <button data-act="del" class="danger">Löschen</button>
       </div>
     </details>
+  </div>`;
+}
+
+function gradingDocHtml(g) {
+  const sevL = { 1: 'leicht', 2: 'mittel', 3: 'stark' };
+  const catL = { surface: 'Oberfläche', corner: 'Ecke', edge: 'Kante' };
+  const per = { front: 0, back: 0 };
+  const list = (g.defects || []).map((d) => {
+    per[d.side] = (per[d.side] || 0) + 1;
+    return `<li>${d.side === 'back' ? 'H' : 'V'}${per[d.side]} · ${catL[d.cat] || d.cat} · ${esc(d.kind)} · ${sevL[d.sev]}${d.note ? ' – ' + esc(d.note) : ''}</li>`;
+  }).join('');
+  const ph = g.annotated || g.photos || {};
+  return `<div class="g-doc">
+    <h3>Grading-Dokumentation</h3>
+    <div class="meta"><span class="grade-badge">PSA ~${g.overall} geschätzt</span> ${dt(g.date)}</div>
+    <div class="meta">Zentrierung max. ${g.cap} · Ecken ${fmt1(g.sub.corners)} · Kanten ${fmt1(g.sub.edges)} · Oberfläche ${fmt1(g.sub.surface)}</div>
+    ${ph.front || ph.back ? `<div class="g-photos">${ph.front ? `<img src="${ph.front}" alt="vorne">` : ''}${ph.back ? `<img src="${ph.back}" alt="hinten">` : ''}</div>` : ''}
+    ${list ? `<ul class="g-list">${list}</ul>` : '<p class="hint">Keine Mängel markiert.</p>'}
+    <button data-act="report" class="block">Bericht teilen</button>
   </div>`;
 }
 
@@ -985,6 +1110,8 @@ function bindInvItem(row) {
     renderInventory();
   });
   $('[data-act=open]', row).addEventListener('click', () => openCard(it.lang, it.id));
+  const rep = $('[data-act=report]', row);
+  if (rep) rep.addEventListener('click', () => shareReport({ name: it.name, sub: `${it.setName} · Nr. ${it.localId}${it.official ? '/' + it.official : ''}` }, it.grading, toast));
 }
 
 function exportCsv() {

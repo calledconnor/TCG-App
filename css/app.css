@@ -259,3 +259,23 @@ code { font-size: 12px; background: var(--sunken); padding: 1px 6px; border-radi
 .g-photos { display: flex; gap: 8px; margin-top: 10px; }
 .g-photos img { height: 120px; border-radius: 6px; }
 .tabbar button { padding: 0 2px; font-size: 12px; min-width: 0; }
+
+/* Navigation */
+.topbar { gap: 8px; }
+.topbar h1 { flex: 1; }
+.nav-back { min-height: 36px; width: 36px; padding: 0; border-radius: 50%; font-size: 26px; line-height: 1; background: var(--sunken); }
+
+/* Live-Scanner */
+.scan-wrap { position: relative; width: 100%; aspect-ratio: 3 / 4; max-height: 70vh; background: #000; border-radius: 14px; overflow: hidden; margin-top: 10px; }
+.scan-wrap video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.scan-frame { position: absolute; top: 50%; left: 50%; height: 86%; aspect-ratio: 63 / 88; transform: translate(-50%, -50%);
+  border: 2px solid rgba(255,255,255,.85); border-radius: 14px; box-shadow: 0 0 0 9999px rgba(0,0,0,.45); transition: border-color .15s; }
+.scan-frame.ready { border-color: #30d158; }
+.scan-frame.hit { border-color: #30d158; border-width: 4px; }
+.scan-strip { position: absolute; left: 0; right: 0; bottom: 0; height: 11%; border-top: 1px dashed rgba(255,255,255,.7); display: flex; align-items: center; justify-content: center; }
+.scan-strip span { font-size: 11px; color: rgba(255,255,255,.8); letter-spacing: .04em; }
+.status.ok { color: var(--pos); }
+.status.warn { color: var(--warn); }
+.g-doc { margin-top: 12px; padding-top: 4px; }
+.g-list { margin: 10px 0 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
+.g-list li { margin: 3px 0; }

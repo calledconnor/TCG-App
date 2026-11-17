@@ -117,3 +117,29 @@ export function preiseJeZustand({ referenz, cf, refZustand, sprachFaktor: sf = 1
     return { zustand: z, brutto, netto, maxGebot80: netto * 0.8 };
   });
 }
+
+/**
+ * Toleranter Parser für OCR-Text, wenn der Schrägstrich als 7/1/l/I gelesen wurde ("0067165" -> 006/165).
+ * isValidTotal(n) prüft gegen echte Set-Größen; ohne Prüfer wird nichts geraten.
+ */
+export function parseCardNumberLoose(text, isValidTotal) {
+  const strict = parseCardNumber(text);
+  if (strict) return strict;
+  if (!isValidTotal) return null;
+  const t = String(text).toUpperCase().replace(/O(?=\d)|(?<=\d)O/g, '0');
+  const tokens = t.match(/[0-9IL]{4,8}/g) || [];
+  const cands = [];
+  for (const tok of tokens) {
+    for (let i = 1; i < tok.length - 1; i++) {
+      if (!'71IL'.includes(tok[i])) continue;
+      const left = tok.slice(0, i), right = tok.slice(i + 1);
+      if (!/^\d{1,3}$/.test(left) || !/^\d{2,3}$/.test(right)) continue;
+      const n = parseInt(left, 10), tot = parseInt(right, 10);
+      if (n < 1 || !isValidTotal(tot) || n > tot + 120) continue;
+      // gleich lange Hälften (006/165) bevorzugen
+      cands.push({ number: left, total: right, score: (left.length === right.length ? 0 : 1) + (n > tot ? 1 : 0) });
+    }
+  }
+  cands.sort((a, b) => a.score - b.score);
+  return cands.length ? { number: cands[0].number, total: cands[0].total } : null;
+}

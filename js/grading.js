@@ -53,6 +53,195 @@ export function overallGrade({ cap, corners, edges, surface }) {
   return Math.max(1, Math.min(cap, Math.floor(lowest)));
 }
 
+/** Homographie (3x3, h33=1), die die 4 Punkte src auf dst abbildet. */
+export function homography(src, dst) {
+  const A = [], b = [];
+  for (let i = 0; i < 4; i++) {
+    const [x, y] = src[i], [u, v] = dst[i];
+    A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); b.push(u);
+    A.push([0, 0, 0, x, y, 1, -v * x, -v * y]); b.push(v);
+  }
+  // Gauß-Elimination
+  const n = 8;
+  for (let c = 0; c < n; c++) {
+    let p = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(A[r][c]) > Math.abs(A[p][c])) p = r;
+    [A[c], A[p]] = [A[p], A[c]]; [b[c], b[p]] = [b[p], b[c]];
+    for (let r = 0; r < n; r++) {
+      if (r === c) continue;
+      const f = A[r][c] / A[c][c];
+      for (let k = c; k < n; k++) A[r][k] -= f * A[c][k];
+      b[r] -= f * b[c];
+    }
+  }
+  const h = b.map((v, i) => v / A[i][i]);
+  return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
+}
+export function applyH(H, x, y) {
+  const w = H[6] * x + H[7] * y + H[8];
+  return [(H[0] * x + H[1] * y + H[2]) / w, (H[3] * x + H[4] * y + H[5]) / w];
+}
+
+/** Perspektivisch entzerren: Ecken (TL, TR, BR, BL in Pixeln) -> gerades Rechteck W×H (Karte 63:88). */
+export function warpCard(src, corners, H = 1000, margin = 0) {
+  const cw = Math.round((H * 63) / 88), ch = H;
+  const mx = Math.round(cw * margin), my = Math.round(ch * margin);
+  const W = cw + 2 * mx;
+  H = ch + 2 * my;
+  const M = homography([[mx, my], [mx + cw, my], [mx + cw, my + ch], [mx, my + ch]], corners); // Ziel -> Quelle
+  const sw = src.width, sh = src.height;
+  const sd = src.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, sw, sh).data;
+  const out = document.createElement('canvas');
+  out.width = W; out.height = H;
+  const octx = out.getContext('2d');
+  const od = octx.createImageData(W, H);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const [fx, fy] = applyH(M, x + 0.5, y + 0.5);
+      const x0 = Math.floor(fx - 0.5), y0 = Math.floor(fy - 0.5);
+      const ax = fx - 0.5 - x0, ay = fy - 0.5 - y0;
+      const o = (y * W + x) * 4;
+      if (x0 < 0 || y0 < 0 || x0 + 1 >= sw || y0 + 1 >= sh) { od.data[o + 3] = 255; continue; }
+      const i00 = (y0 * sw + x0) * 4, i10 = i00 + 4, i01 = i00 + sw * 4, i11 = i01 + 4;
+      for (let k = 0; k < 3; k++) {
+        od.data[o + k] = (sd[i00 + k] * (1 - ax) + sd[i10 + k] * ax) * (1 - ay) + (sd[i01 + k] * (1 - ax) + sd[i11 + k] * ax) * ay;
+      }
+      od.data[o + 3] = 255;
+    }
+  }
+  octx.putImageData(od, 0, 0);
+  return out;
+}
+
+/**
+ * Kartenecken im Foto finden: Hintergrundfarbe vom Bildrand, Maske, je Seite eine Gerade durch die
+ * Randpunkte (mittlere 60 %), Ecken = Schnittpunkte (funktioniert auch mit abgerundeten Ecken).
+ * Rückgabe: [[x,y] TL, TR, BR, BL] in Pixeln des Quellbilds oder null.
+ */
+export function detectCorners(src) {
+  try {
+    const s = Math.min(1, 360 / Math.max(src.width, src.height));
+    const w = Math.round(src.width * s), h = Math.round(src.height * s);
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(src, 0, 0, w, h);
+    const d = ctx.getImageData(0, 0, w, h).data;
+    // Hintergrund = Median der Randpixel
+    const rs = [], gs = [], bs = [];
+    const push = (x, y) => { const i = (y * w + x) * 4; rs.push(d[i]); gs.push(d[i + 1]); bs.push(d[i + 2]); };
+    for (let x = 0; x < w; x += 2) { push(x, 1); push(x, h - 2); }
+    for (let y = 0; y < h; y += 2) { push(1, y); push(w - 2, y); }
+    const med = (a) => a.sort((p, q) => p - q)[a.length >> 1];
+    const br = med(rs), bg = med(gs), bb = med(bs);
+    let mask = new Uint8Array(w * h), cnt = 0;
+    for (let i = 0, j = 0; j < w * h; i += 4, j++) {
+      const dist = Math.abs(d[i] - br) + Math.abs(d[i + 1] - bg) + Math.abs(d[i + 2] - bb);
+      if (dist > 70) { mask[j] = 1; cnt++; }
+    }
+    if (cnt < w * h * 0.12 || cnt > w * h * 0.97) return null;
+    // Erosion (2x) gegen Rauschen
+    for (let pass = 0; pass < 2; pass++) {
+      const m2 = new Uint8Array(w * h);
+      for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+        const j = y * w + x;
+        m2[j] = mask[j] && mask[j - 1] && mask[j + 1] && mask[j - w] && mask[j + w] ? 1 : 0;
+      }
+      mask = m2;
+    }
+    // grobe Ausdehnung
+    let minX = w, maxX = 0, minY = h, maxY = 0;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (mask[y * w + x]) {
+      if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+    if (maxX - minX < w * 0.3 || maxY - minY < h * 0.3) return null;
+    const fit = (pts) => { // x = a*t + b (kleinste Quadrate)
+      const n = pts.length; let st = 0, sx = 0, stt = 0, stx = 0;
+      for (const [t, x] of pts) { st += t; sx += x; stt += t * t; stx += t * x; }
+      const a = (n * stx - st * sx) / (n * stt - st * st || 1);
+      return { a, b: (sx - a * st) / n };
+    };
+    const L = [], R = [], T = [], B = [];
+    const y0 = minY + (maxY - minY) * 0.2, y1 = minY + (maxY - minY) * 0.8;
+    for (let y = Math.round(y0); y <= y1; y++) {
+      let x = 0; while (x < w && !mask[y * w + x]) x++; if (x < w) L.push([y, x]);
+      x = w - 1; while (x >= 0 && !mask[y * w + x]) x--; if (x >= 0) R.push([y, x]);
+    }
+    const x0 = minX + (maxX - minX) * 0.2, x1 = minX + (maxX - minX) * 0.8;
+    for (let x = Math.round(x0); x <= x1; x++) {
+      let y = 0; while (y < h && !mask[y * w + x]) y++; if (y < h) T.push([x, y]);
+      y = h - 1; while (y >= 0 && !mask[y * w + x]) y--; if (y >= 0) B.push([x, y]);
+    }
+    if (L.length < 5 || R.length < 5 || T.length < 5 || B.length < 5) return null;
+    const fl = fit(L), fr = fit(R), ft = fit(T), fb = fit(B);
+    // Erosion hat die Kante um ~2 px nach innen verschoben -> ausgleichen
+    fl.b -= 2; fr.b += 2; ft.b -= 2; fb.b += 2;
+    const cross = (v, hz) => { // v: x = a*y + b ; hz: y = a*x + b
+      const x = (v.a * hz.b + v.b) / (1 - v.a * hz.a);
+      return [x / s, (hz.a * x + hz.b) / s];
+    };
+    return [cross(fl, ft), cross(fr, ft), cross(fr, fb), cross(fl, fb)];
+  } catch {
+    return null;
+  }
+}
+
+/** Grading-Bericht als PNG (Blob): Karte, Note, Teilnoten, Zentrierung, annotierte Fotos, Mängelliste. */
+export async function makeReport(meta, g) {
+  const load = (src) => new Promise((res) => { if (!src) return res(null); const i = new Image(); i.onload = () => res(i); i.onerror = () => res(null); i.src = src; });
+  const imgs = await Promise.all([load(g.annotated?.front || g.photos?.front), load(g.annotated?.back || g.photos?.back)]);
+  const W = 1200, pad = 48, photoH = 640;
+  const defects = g.defects || [];
+  const H = pad * 2 + 250 + (imgs.some(Boolean) ? photoH + 40 : 0) + 60 + defects.length * 40 + 60;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const x = c.getContext('2d');
+  x.fillStyle = '#fff'; x.fillRect(0, 0, W, H);
+  x.fillStyle = '#0a0a0a'; x.textBaseline = 'top';
+  x.font = '600 22px system-ui, sans-serif'; x.fillStyle = '#71717a';
+  x.fillText('Grading-Check · ' + new Date(g.date).toLocaleString('de-DE'), pad, pad);
+  x.fillStyle = '#0a0a0a'; x.font = '700 44px system-ui, sans-serif';
+  x.fillText(meta.name || 'Karte', pad, pad + 36);
+  x.font = '400 24px system-ui, sans-serif'; x.fillStyle = '#71717a';
+  x.fillText(meta.sub || '', pad, pad + 92);
+  x.fillStyle = '#0a0a0a'; x.font = '700 64px system-ui, sans-serif';
+  x.fillText('PSA ~' + g.overall, pad, pad + 132);
+  x.font = '400 24px system-ui, sans-serif'; x.fillStyle = '#3f3f46';
+  const f1 = (v) => (v == null ? '–' : v.toLocaleString('de-DE', { maximumFractionDigits: 1 }));
+  const cen = (c2) => (c2 ? `${f1(c2.lr)}/${f1(100 - c2.lr)} · ${f1(c2.tb)}/${f1(100 - c2.tb)}` : '–');
+  x.fillText(`Zentrierung max. ${g.cap}  ·  vorne ${cen(g.centering?.front)}  ·  hinten ${cen(g.centering?.back)}`, pad + 300, pad + 140);
+  x.fillText(`Ecken ${f1(g.sub.corners)}  ·  Kanten ${f1(g.sub.edges)}  ·  Oberfläche ${f1(g.sub.surface)}`, pad + 300, pad + 176);
+  let y = pad + 250;
+  if (imgs.some(Boolean)) {
+    let px = pad;
+    for (const [i, im] of imgs.entries()) {
+      if (!im) continue;
+      const w = Math.round((photoH * im.width) / im.height);
+      x.drawImage(im, px, y, w, photoH);
+      x.font = '500 20px system-ui, sans-serif'; x.fillStyle = '#71717a';
+      x.fillText(i === 0 ? 'Vorderseite' : 'Rückseite', px, y + photoH + 8);
+      px += w + 32;
+    }
+    y += photoH + 50;
+  }
+  x.fillStyle = '#0a0a0a'; x.font = '600 26px system-ui, sans-serif';
+  x.fillText(`Mängel (${defects.length})`, pad, y);
+  y += 44;
+  x.font = '400 22px system-ui, sans-serif';
+  const sevL = { 1: 'leicht', 2: 'mittel', 3: 'stark' };
+  const catL = { surface: 'Oberfläche', corner: 'Ecke', edge: 'Kante' };
+  const per = { front: 0, back: 0 };
+  for (const d of defects) {
+    per[d.side] = (per[d.side] || 0) + 1;
+    x.fillStyle = '#0a0a0a';
+    x.fillText(`${d.side === 'back' ? 'H' : 'V'}${per[d.side]}  ${catL[d.cat] || d.cat} · ${d.kind} · ${sevL[d.sev]}${d.note ? ' – ' + d.note : ''}`, pad, y);
+    y += 40;
+  }
+  x.font = '400 18px system-ui, sans-serif'; x.fillStyle = '#a1a1aa';
+  x.fillText('Schätzung nach PSA-Zentrierungsrichtlinie, kein offizielles Grading. Erstellt mit Kartenwert.', pad, H - pad);
+  return new Promise((res) => c.toBlob(res, 'image/png'));
+}
+
 // ---------------- UI ----------------
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -60,12 +249,34 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const fmt = (v) => v.toLocaleString('de-DE', { maximumFractionDigits: 1 });
 
 const defaultLines = () => ({ outerL: 0.03, outerR: 0.97, outerT: 0.02, outerB: 0.98, innerL: 0.085, innerR: 0.915, innerT: 0.065, innerB: 0.935 });
-const newSide = () => ({ photo: null, img: null, lines: defaultLines(), defects: [] });
+const newSide = () => ({ raw: null, corners: null, straight: false, img: null, lines: defaultLines(), defects: [] });
+
+/** Bericht erzeugen und teilen (Teilen-Menü) bzw. herunterladen. */
+export async function shareReport(meta, g, toast) {
+  const blob = await makeReport(meta, g);
+  const name = `grading-${(meta.name || 'karte').replace(/[^\w-]+/g, '_')}-${new Date(g.date).toISOString().slice(0, 10)}.png`;
+  const file = new File([blob], name, { type: 'image/png' });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: 'Grading-Bericht' });
+      return;
+    }
+  } catch (e) {
+    if (e && e.name === 'AbortError') return;
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+  toast && toast('Bericht gespeichert');
+}
 
 export function createGrading({ root, getCard, onApply, toast }) {
   const st = {
     side: 'front',
-    mode: 'center',
+    mode: 'straighten',
     filter: false,
     sides: { front: newSide(), back: newSide() },
     overrides: { corners: null, edges: null, surface: null },
@@ -78,11 +289,19 @@ export function createGrading({ root, getCard, onApply, toast }) {
     <div class="card" id="g-for"></div>
     <div class="card">
       <div class="seg" id="g-side"><button data-s="front" class="on">Vorderseite</button><button data-s="back">Rückseite</button></div>
-      <label class="btn primary block">Foto aufnehmen oder wählen<input id="g-file" type="file" accept="image/*" capture="environment" hidden /></label>
+      <div class="grid2" style="margin-top:6px">
+        <label class="btn primary">Kamera<input id="g-file" type="file" accept="image/*" capture="environment" hidden /></label>
+        <label class="btn">Aus Galerie<input id="g-gal" type="file" accept="image/*" hidden /></label>
+      </div>
       <p class="hint">Karte gerade, flach und formatfüllend fotografieren, ohne Hülle und bei gleichmäßigem Licht ohne Spiegelung.</p>
       <div id="g-stage-wrap" class="hidden">
-        <div class="seg" id="g-mode"><button data-m="center" class="on">Zentrierung</button><button data-m="defect">Mängel markieren</button></div>
-        <div class="inline g-tools">
+        <div class="seg" id="g-mode"><button data-m="straighten" class="on">Begradigen</button><button data-m="center">Zentrierung</button><button data-m="defect">Mängel</button></div>
+        <div class="inline g-tools" id="g-tools-straight">
+          <button class="small primary" id="g-apply-straight">Begradigen und weiter</button>
+          <button class="small" id="g-auto-corners">Ecken neu erkennen</button>
+          <button class="small" id="g-skip-straight">Ohne Begradigen</button>
+        </div>
+        <div class="inline g-tools hidden" id="g-tools-measure">
           <button class="small" id="g-filter">Oberflächen-Filter</button>
           <button class="small" id="g-reset-lines">Linien zurücksetzen</button>
         </div>
@@ -109,7 +328,7 @@ export function createGrading({ root, getCard, onApply, toast }) {
   }
 
   // ---------- Foto ----------
-  $('#g-file', root).addEventListener('change', (e) => {
+  const onPick = (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
     const im = new Image();
@@ -121,17 +340,61 @@ export function createGrading({ root, getCard, onApply, toast }) {
       c.height = Math.round(im.naturalHeight * s);
       c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
       const sd = side();
+      sd.raw = c;
       sd.img = c;
-      sd.photo = c.toDataURL('image/jpeg', 0.82);
+      sd.straight = false;
+      sd.defects = [];
+      sd.corners = detectCorners(c) || defaultCorners(c);
       sd.lines = autoDetect(c) || defaultLines();
       filtered = null;
       $('#g-stage-wrap', root).classList.remove('hidden');
-      draw();
+      setMode('straighten');
       renderAll();
       URL.revokeObjectURL(im.src);
     };
     im.src = URL.createObjectURL(f);
     e.target.value = '';
+  };
+  $('#g-file', root).addEventListener('change', onPick);
+  $('#g-gal', root).addEventListener('change', onPick);
+  const defaultCorners = (c) => [[c.width * 0.05, c.height * 0.04], [c.width * 0.95, c.height * 0.04], [c.width * 0.95, c.height * 0.96], [c.width * 0.05, c.height * 0.96]];
+
+  function setMode(m) {
+    st.mode = m;
+    $$('#g-mode button', root).forEach((x) => x.classList.toggle('on', x.dataset.m === m));
+    $('#g-tools-straight', root).classList.toggle('hidden', m !== 'straighten');
+    $('#g-tools-measure', root).classList.toggle('hidden', m === 'straighten');
+    draw();
+    renderHelp();
+  }
+  $('#g-apply-straight', root).addEventListener('click', () => {
+    const sd = side();
+    if (!sd.raw) return;
+    // mit 4 % Rand entzerren: die echte Außenkante wird danach in voller Auflösung gemessen
+    sd.img = warpCard(sd.raw, sd.corners, Math.min(1200, Math.max(800, Math.round(sd.raw.height * 0.8))), 0.04);
+    sd.straight = true;
+    sd.lines = autoDetect(sd.img, { cropped: false }) || defaultLines();
+    sd.defects = [];
+    filtered = null;
+    setMode('center');
+    renderAll();
+  });
+  $('#g-auto-corners', root).addEventListener('click', () => {
+    const sd = side();
+    if (!sd.raw) return;
+    const c = detectCorners(sd.raw);
+    if (!c) toast('Ecken nicht sicher erkannt – bitte von Hand an die Kartenecken ziehen');
+    sd.corners = c || defaultCorners(sd.raw);
+    draw();
+  });
+  $('#g-skip-straight', root).addEventListener('click', () => {
+    const sd = side();
+    sd.img = sd.raw;
+    sd.straight = false;
+    sd.lines = autoDetect(sd.img) || defaultLines();
+    filtered = null;
+    setMode('center');
+    renderAll();
   });
 
   $$('#g-side button', root).forEach((b) =>
@@ -140,38 +403,33 @@ export function createGrading({ root, getCard, onApply, toast }) {
       $$('#g-side button', root).forEach((x) => x.classList.toggle('on', x === b));
       filtered = null;
       $('#g-stage-wrap', root).classList.toggle('hidden', !side().img);
-      draw();
+      setMode(side().img ? (side().straight ? 'center' : 'straighten') : 'straighten');
       renderAll();
     }),
   );
-  $$('#g-mode button', root).forEach((b) =>
-    b.addEventListener('click', () => {
-      st.mode = b.dataset.m;
-      $$('#g-mode button', root).forEach((x) => x.classList.toggle('on', x === b));
-      draw();
-      renderHelp();
-    }),
-  );
+  $$('#g-mode button', root).forEach((b) => b.addEventListener('click', () => setMode(b.dataset.m)));
   $('#g-filter', root).addEventListener('click', () => {
     st.filter = !st.filter;
     $('#g-filter', root).classList.toggle('primary', st.filter);
     draw();
   });
   $('#g-reset-lines', root).addEventListener('click', () => {
-    side().lines = (side().img && autoDetect(side().img)) || defaultLines();
+    side().lines = (side().img && autoDetect(side().img, side().straight ? { cropped: false } : {})) || defaultLines();
     draw();
     renderAll();
   });
 
   function renderHelp() {
     $('#g-help', root).textContent =
-      st.mode === 'center'
+      st.mode === 'straighten'
+        ? 'Die vier Punkte auf die Ecken der Karte ziehen (Lupe hilft). „Begradigen und weiter“ legt die Karte gerade und formatfüllend hin.'
+        : st.mode === 'center'
         ? 'Gelbe Linien an die Außenkante der Karte, türkise Linien an den inneren Bildrahmen schieben. Beim Ziehen zeigt eine Lupe die Stelle vergrößert.'
         : 'Auf eine Stelle tippen, um einen Mangel zu markieren. Art und Schwere darunter einstellen. Der Oberflächen-Filter macht Kratzer und Dellen sichtbarer.';
   }
 
   // ---------- Automatische Erkennung (Startwerte) ----------
-  function autoDetect(c) {
+  function autoDetect(c, opts = {}) {
     try {
       const w = c.width, h = c.height;
       const d = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h).data;
@@ -193,7 +451,7 @@ export function createGrading({ root, getCard, onApply, toast }) {
       };
       // Bild bereits auf die Karte zugeschnitten (Scan, Seitenverhältnis 63:88)? Dann liegt die Außenkante am Bildrand.
       const aspect = w / h;
-      const cropped = aspect > 0.69 && aspect < 0.745;
+      const cropped = opts.cropped ?? (aspect > 0.69 && aspect < 0.745);
       const oL = cropped ? 0 : firstPeak(colG, 2, w * 0.3, true), oR = cropped ? w - 1 : firstPeak(colG, w * 0.7, w - 3, false);
       const oT = cropped ? 0 : firstPeak(rowG, 2, h * 0.3, true), oB = cropped ? h - 1 : firstPeak(rowG, h * 0.7, h - 3, false);
       const cw = oR - oL, ch = oB - oT;
@@ -231,24 +489,37 @@ export function createGrading({ root, getCard, onApply, toast }) {
 
   // ---------- Zeichnen ----------
   const LINE_KEYS = ['outerL', 'outerR', 'outerT', 'outerB', 'innerL', 'innerR', 'innerT', 'innerB'];
+  const srcOf = (sd) => (st.mode === 'straighten' ? sd.raw : sd.img);
   function geom() {
-    const im = side().img;
+    const im = srcOf(side());
     const w = cv.clientWidth || 600;
     const h = Math.round((w * im.height) / im.width);
     return { w, h };
   }
   function draw() {
     const sd = side();
-    if (!sd.img) return;
+    if (!srcOf(sd)) return;
     const { w, h } = geom();
     const dpr = devicePixelRatio || 1;
     cv.width = w * dpr; cv.height = h * dpr; cv.style.height = h + 'px';
     const ctx = cv.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    let src = sd.img;
-    if (st.filter) src = filtered || (filtered = edgeFilter(sd.img));
+    let src = srcOf(sd);
+    if (st.filter && st.mode !== 'straighten') src = filtered || (filtered = edgeFilter(sd.img));
     ctx.drawImage(src, 0, 0, w, h);
     const L = sd.lines;
+    if (st.mode === 'straighten' && sd.corners) {
+      const k = w / sd.raw.width;
+      const P = sd.corners.map(([x, y]) => [x * k, y * k]);
+      ctx.fillStyle = 'rgba(48,209,88,.12)';
+      ctx.strokeStyle = '#30d158'; ctx.lineWidth = 2;
+      ctx.beginPath(); P.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath(); ctx.fill(); ctx.stroke();
+      P.forEach(([x, y], i) => {
+        ctx.fillStyle = st.drag === 'c' + i ? '#fff' : '#30d158';
+        ctx.beginPath(); ctx.arc(x, y, 11, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5; ctx.stroke();
+      });
+    }
     if (st.mode === 'center') {
       for (const k of LINE_KEYS) {
         const vertical = /L$|R$/.test(k);
@@ -266,7 +537,7 @@ export function createGrading({ root, getCard, onApply, toast }) {
       }
     }
     // Mängel
-    sd.defects.forEach((d, i) => {
+    if (st.mode !== 'straighten') sd.defects.forEach((d, i) => {
       const x = d.x * w, y = d.y * h;
       ctx.lineWidth = 2;
       ctx.strokeStyle = d.sev >= 3 ? '#ff453a' : d.sev === 2 ? '#ff9f0a' : '#ffd60a';
@@ -299,8 +570,21 @@ export function createGrading({ root, getCard, onApply, toast }) {
   };
   cv.addEventListener('pointerdown', (e) => {
     const sd = side();
-    if (!sd.img) return;
+    if (!srcOf(sd)) return;
     const p = rel(e);
+    if (st.mode === 'straighten') {
+      const k = p.w / sd.raw.width;
+      let best = null, bd = 40;
+      sd.corners.forEach(([x, y], i) => { const dd = Math.hypot(x * k - p.x, y * k - p.y); if (dd < bd) { bd = dd; best = i; } });
+      if (best != null) {
+        st.drag = 'c' + best;
+        cv.setPointerCapture(e.pointerId);
+        st.loupe = { x: p.x, y: p.y };
+        e.preventDefault();
+        draw();
+      }
+      return;
+    }
     if (st.mode === 'center') {
       let best = null, bd = 28;
       for (const k of LINE_KEYS) {
@@ -337,6 +621,13 @@ export function createGrading({ root, getCard, onApply, toast }) {
     if (!st.drag) return;
     const p = rel(e);
     const k = st.drag;
+    if (k.startsWith('c')) {
+      const sd = side(), sc = sd.raw.width / p.w;
+      sd.corners[+k.slice(1)] = [Math.min(sd.raw.width, Math.max(0, p.x * sc)), Math.min(sd.raw.height, Math.max(0, p.y * sc))];
+      st.loupe = { x: p.x, y: p.y };
+      draw();
+      return;
+    }
     const vertical = /L$|R$/.test(k);
     side().lines[k] = Math.min(1, Math.max(0, vertical ? p.x / p.w : p.y / p.h));
     st.loupe = { x: p.x, y: p.y };
@@ -456,8 +747,9 @@ export function createGrading({ root, getCard, onApply, toast }) {
       <p class="date">Schätzung: niedrigste Teilnote, gedeckelt durch die Zentrierung. Abzug je Mangel: leicht 0,5 · mittel 1,5 · stark 3. Ersetzt kein offizielles Grading; Fotos zeigen feine Kratzer oft nicht.</p>
       <div class="grid2" style="margin-top:10px">
         <button class="primary" id="g-apply">Zur Karte übernehmen</button>
-        <button id="g-clear" class="danger">Alles zurücksetzen</button>
-      </div>`;
+        <button id="g-report">Bericht teilen</button>
+      </div>
+      <button id="g-clear" class="block ghost danger">Alles zurücksetzen</button>`;
     $$('[data-ov]', root).forEach((s) =>
       s.addEventListener('change', () => {
         st.overrides[s.dataset.ov] = s.value === '' ? null : +s.value;
@@ -468,6 +760,11 @@ export function createGrading({ root, getCard, onApply, toast }) {
       const res = result();
       if (!getCard()) return toast('Zuerst eine Karte unter „Suchen“ öffnen');
       onApply(res);
+    });
+    $('#g-report', root).addEventListener('click', async () => {
+      const c = getCard();
+      const res = result();
+      await shareReport({ name: c ? c.name : 'Karte', sub: c ? `${c.set?.name || ''} · Nr. ${c.localId}${c.set?.cardCount?.official ? '/' + c.set.cardCount.official : ''}` : '' }, res, toast);
     });
     $('#g-clear', root).addEventListener('click', () => {
       if (!confirm('Fotos, Linien und Mängel zurücksetzen?')) return;
@@ -499,8 +796,34 @@ export function createGrading({ root, getCard, onApply, toast }) {
       c.getContext('2d').drawImage(sd.img, 0, 0, c.width, c.height);
       return c.toDataURL('image/jpeg', 0.75);
     };
+    const annotated = (sd) => {
+      if (!sd.img) return null;
+      const s2 = Math.min(1, 900 / sd.img.height);
+      const c = document.createElement('canvas');
+      c.width = Math.round(sd.img.width * s2);
+      c.height = Math.round(sd.img.height * s2);
+      const x = c.getContext('2d');
+      x.drawImage(sd.img, 0, 0, c.width, c.height);
+      const w = c.width, h = c.height, L = sd.lines;
+      x.lineWidth = 2;
+      for (const k of LINE_KEYS) {
+        x.strokeStyle = k.startsWith('outer') ? '#ffd60a' : '#22d3ee';
+        x.beginPath();
+        if (/L$|R$/.test(k)) { x.moveTo(L[k] * w, 0); x.lineTo(L[k] * w, h); } else { x.moveTo(0, L[k] * h); x.lineTo(w, L[k] * h); }
+        x.stroke();
+      }
+      sd.defects.forEach((d, i) => {
+        x.strokeStyle = d.sev >= 3 ? '#ff453a' : d.sev === 2 ? '#ff9f0a' : '#ffd60a';
+        x.lineWidth = 3; x.fillStyle = 'rgba(0,0,0,.6)';
+        x.beginPath(); x.arc(d.x * w, d.y * h, 16, 0, Math.PI * 2); x.fill(); x.stroke();
+        x.fillStyle = '#fff'; x.font = '700 16px system-ui'; x.textAlign = 'center'; x.textBaseline = 'middle';
+        x.fillText(String(i + 1), d.x * w, d.y * h);
+      });
+      return c.toDataURL('image/jpeg', 0.8);
+    };
     return {
       date: Date.now(),
+      annotated: { front: annotated(st.sides.front), back: annotated(st.sides.back) },
       overall: r.overall,
       cap: r.cap,
       sub: r.sub,

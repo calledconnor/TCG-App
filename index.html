@@ -13,6 +13,7 @@
 </head>
 <body>
   <header class="topbar">
+    <button id="nav-back" class="nav-back hidden" aria-label="Zurück">‹</button>
     <h1>Kartenwert</h1>
     <span id="net-status" class="net" aria-live="polite"></span>
   </header>
@@ -50,10 +51,23 @@
         </form>
 
         <div class="mode-pane hidden" data-pane="camera">
-          <label class="btn primary block file-btn">
-            Karte fotografieren
-            <input id="cam-input" type="file" accept="image/*" capture="environment" hidden />
-          </label>
+          <button id="scan-start" class="primary block">Live-Scanner starten</button>
+          <div id="scan-live" class="hidden">
+            <div class="scan-wrap" id="scan-wrap">
+              <video id="scan-video" playsinline muted autoplay></video>
+              <div class="scan-frame" id="scan-frame"><div class="scan-strip"><span>Nummer</span></div></div>
+            </div>
+            <p id="scan-status" class="status" aria-live="polite"></p>
+            <div class="grid2">
+              <button id="scan-torch" class="hidden">Licht</button>
+              <button id="scan-stop">Scanner beenden</button>
+            </div>
+          </div>
+          <div class="grid2" style="margin-top:10px">
+            <label class="btn file-btn">Foto aufnehmen<input id="cam-input" type="file" accept="image/*" capture="environment" hidden /></label>
+            <label class="btn file-btn">Aus Galerie<input id="gal-input" type="file" accept="image/*" hidden /></label>
+          </div>
+          <p class="hint">Live-Scanner: Karte in den Rahmen halten, die Nummer wird automatisch gelesen, sobald das Bild scharf ist.</p>
           <div id="crop-wrap" class="hidden">
             <p class="hint">Rechteck um die Kartennummer ziehen.</p>
             <div class="crop-presets">
