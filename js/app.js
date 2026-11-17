@@ -4,7 +4,7 @@ import {
 } from './calc.js';
 import {
   ALL_LANGS, setApiBase, probeLanguages, searchByName, searchByNumber,
-  getCard, extractPricing, englishName, setIdOf, getSets, usdEur, searchSmart, gradedPrices,
+  getCard, extractPricing, englishName, setIdOf, getSets, usdEur, searchSmart, gradedPrices, getJSON,
 } from './api.js';
 import { db, kvGet, kvSet } from './db.js';
 import { createGrading, shareReport, checklistLines } from './grading.js';
@@ -63,6 +63,71 @@ const LANG_NAME = {
 };
 const condText = (k) => `${k} · ${CONDITION_LABELS[k] || k}${CONDITION_DE[k] ? ' (' + CONDITION_DE[k] + ')' : ''}`;
 
+const TRASH = '<svg class="ico" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+// ---------- Wischen zum Löschen (mit Rückgängig) ----------
+function toastUndo(msg, undo) {
+  const t = $('#toast');
+  t.innerHTML = `${esc(msg)} <button class="toast-undo">Rückgängig</button>`;
+  t.classList.add('show', 'interactive');
+  clearTimeout(toast._t);
+  const btn = t.querySelector('.toast-undo');
+  btn.addEventListener('click', () => { undo(); t.classList.remove('show', 'interactive'); });
+  toast._t = setTimeout(() => t.classList.remove('show', 'interactive'), 4500);
+}
+/**
+ * Zeilen in `container` (Selektor `sel`, Attribut `data-uid`) nach links wischen = löschen.
+ * remove(uid) entfernt und gibt eine Rückgängig-Funktion zurück.
+ */
+function enableSwipe(container, sel, remove, label = 'Entfernt') {
+  $$(sel, container).forEach((row) => {
+    if (row.dataset.swipe) return;
+    row.dataset.swipe = '1';
+    row.classList.add('swipe-row');
+    let sx = 0, sy = 0, dx = 0, active = false, decided = false;
+    row.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1 || e.target.closest('input,select,textarea,canvas')) return;
+      sx = e.touches[0].clientX; sy = e.touches[0].clientY; dx = 0; active = true; decided = false;
+      row.style.transition = 'none';
+    }, { passive: true });
+    row.addEventListener('touchmove', (e) => {
+      if (!active) return;
+      const mx = e.touches[0].clientX - sx, my = e.touches[0].clientY - sy;
+      if (!decided) {
+        if (Math.abs(mx) < 8 && Math.abs(my) < 8) return;
+        decided = true;
+        if (Math.abs(my) > Math.abs(mx) || mx > 0 || sx < 30) { active = false; return; } // Scrollen bzw. Zurück-Geste
+      }
+      dx = Math.min(0, mx);
+      e.preventDefault();
+      row.style.transform = `translateX(${dx}px)`;
+      row.classList.toggle('swipe-armed', dx < -row.offsetWidth * 0.35);
+    }, { passive: false });
+    const end = () => {
+      if (!active) return;
+      active = false;
+      row.style.transition = 'transform .22s ease, opacity .22s ease';
+      if (dx < -row.offsetWidth * 0.35) {
+        row.style.transform = 'translateX(-110%)';
+        row.style.opacity = '0';
+        setTimeout(() => {
+          row.style.transition = 'height .2s ease, padding .2s ease, margin .2s ease';
+          row.style.height = row.offsetHeight + 'px';
+          requestAnimationFrame(() => { row.style.height = '0px'; row.style.paddingTop = row.style.paddingBottom = '0px'; row.style.borderWidth = '0'; });
+          setTimeout(() => {
+            const undo = remove(row.dataset.uid);
+            if (undo) toastUndo(label, undo);
+          }, 210);
+        }, 220);
+      } else {
+        row.style.transform = '';
+        row.classList.remove('swipe-armed');
+      }
+    };
+    row.addEventListener('touchend', end);
+    row.addEventListener('touchcancel', end);
+  });
+}
+
 // ---------- Zustand ----------
 let settings = structuredClone(DEFAULT_SETTINGS);
 let langAvail = {};
@@ -115,6 +180,7 @@ function show(view, { push = true, keepScroll = true } = {}) {
   $$('.tabbar button').forEach((b) => b.classList.toggle('on', b.dataset.view === view));
   if (view === 'inv') renderInventory();
   if (view === 'cart') renderCart();
+  if (view === 'calc') renderCalc();
   if (view === 'settings') renderSettings();
   if (view === 'grade') grading && grading.refresh();
   if (view === 'eval' && cur && $('#graded-api')) renderGradedApi();
@@ -284,6 +350,196 @@ function onPhotoPicked(e) {
 }
 $('#cam-input').addEventListener('change', onPhotoPicked);
 $('#gal-input').addEventListener('change', onPhotoPicked);
+
+// ---------- KI-Kartenerkennung + Scan-Liste (dauerhaft gespeichert) ----------
+let scanList = [];
+const saveScan = () => kvSet('scanlist', scanList);
+async function loadScan() { scanList = (await kvGet('scanlist', [])) || []; renderScanList(); }
+const LANG_FROM_AI = { de: 'de', en: 'en', fr: 'fr', it: 'it', es: 'es', pt: 'pt-br', ja: 'ja', ko: 'ko', zh: 'zh-tw' };
+
+function toJpeg(file, maxSide = 1500) {
+  return new Promise((resolve, reject) => {
+    const im = new Image();
+    im.onload = () => {
+      const s = Math.min(1, maxSide / Math.max(im.naturalWidth, im.naturalHeight));
+      const c = document.createElement('canvas');
+      c.width = Math.round(im.naturalWidth * s);
+      c.height = Math.round(im.naturalHeight * s);
+      c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(im.src);
+      resolve(c.toDataURL('image/jpeg', 0.85).split(',')[1]);
+    };
+    im.onerror = () => reject(new Error('Bild nicht lesbar'));
+    im.src = URL.createObjectURL(file);
+  });
+}
+
+const normName = (x) => String(x || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+function nameScore(a, b) {
+  const A = normName(a), B = normName(b);
+  if (!A || !B) return 0;
+  if (A === B) return 3;
+  if (A.includes(B) || B.includes(A)) return 2;
+  const wa = new Set(A.split(' '));
+  return B.split(' ').filter((w) => wa.has(w)).length ? 1 : 0;
+}
+
+/** Erkannte Karte → TCGdex-Treffer (Nummer + Gesamtzahl, sonst Name + Nummer, sonst Name). */
+async function resolveDetected(d) {
+  const lang = LANG_FROM_AI[d.language] && langAvail[LANG_FROM_AI[d.language]] !== false ? LANG_FROM_AI[d.language] : settings.searchLang;
+  const pick = (list) => list
+    .map((c) => ({ c, sc: Math.max(nameScore(c.name, d.name), nameScore(c.name, d.nameEn)) }))
+    .sort((a, b) => b.sc - a.sc);
+  let cands = [];
+  if (d.number) {
+    try {
+      const r = await searchByNumber(lang, d.number, d.total || '');
+      cands = [...r.exact, ...(r.exact.length ? [] : r.others)].map((c) => ({ ...c, lang }));
+    } catch {}
+    if (!cands.length && lang !== 'en') {
+      try { const r = await searchByNumber('en', d.number, d.total || ''); cands = [...r.exact, ...(r.exact.length ? [] : r.others)].map((c) => ({ ...c, lang: 'en' })); } catch {}
+    }
+    const ranked = pick(cands).filter((x) => x.sc > 0);
+    if (ranked.length) cands = ranked.map((x) => x.c);
+    else if (cands.length > 8) cands = [];
+  }
+  if (!cands.length) {
+    const q = `${d.name}${d.number ? ' ' + d.number + (d.total ? '/' + d.total : '') : ''}`;
+    try { cands = await searchSmart(lang, q, langAvail); } catch {}
+    if (!cands.length && d.nameEn) { try { cands = await searchSmart('en', `${d.nameEn}${d.number ? ' ' + d.number : ''}`, langAvail); } catch {} }
+    cands = pick(cands).map((x) => x.c);
+  }
+  return cands.slice(0, 8).map((c) => ({ id: c.id, lang: c.lang || lang, name: c.name, setName: c.setName, localId: c.localId, official: c.setCount?.official ?? null, image: c.image || null }));
+}
+
+async function priceFor(m) {
+  try {
+    const r = await getCard(m.lang, m.id, { force: false });
+    if (!r.data) return null;
+    const pricing = extractPricing(r.data);
+    const src = marketSources(pricing, null, []);
+    let image = r.data.image || null;
+    if (!image) { const en = await englishName(m.id); image = en?.image || null; }
+    return { pricing, kombi: combine(src), trend: pricing.cardmarket?.trend ?? null, fetchedAt: r.fetchedAt, image };
+  } catch { return null; }
+}
+
+async function aiScanFiles(files) {
+  if (!files.length) return;
+  if (!settings.aiKey) {
+    toast('Für den KI-Scan unter Optionen einen Anthropic-Schlüssel eintragen. Ohne Schlüssel: Live-Scanner oder Nummer.');
+    return;
+  }
+  const status = $('#ai-scan-status');
+  let done = 0, found = 0;
+  for (const f of files) {
+    status.textContent = `Erkenne Foto ${done + 1} von ${files.length} …`;
+    try {
+      const image = await toJpeg(f);
+      const res = await fetch('/api/ai-identify', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Anthropic-Key': settings.aiKey }, body: JSON.stringify({ image }) });
+      const ct = res.headers.get('content-type') || '';
+      if (!ct.includes('json')) throw new Error('KI-Scan geht nur in der Online-Version');
+      const out = await res.json();
+      if (out.error === 'key_invalid') throw new Error('Anthropic-Schlüssel abgelehnt');
+      if (out.error) throw new Error('Erkennung fehlgeschlagen (' + out.error + ')');
+      for (const d of out.result.cards) {
+        const cands = await resolveDetected(d);
+        const entry = { uid: uid(), at: Date.now(), detected: d, cands, sel: 0, status: cands.length === 0 ? 'none' : cands.length === 1 || d.confidence === 'high' ? 'ok' : 'check' };
+        if (cands[0]) entry.price = await priceFor(cands[0]);
+        scanList.unshift(entry);
+        found++;
+        saveScan();
+        renderScanList();
+      }
+    } catch (e) {
+      toast(e.message);
+    }
+    done++;
+  }
+  status.textContent = `${found} Karte${found === 1 ? '' : 'n'} aus ${files.length} Foto${files.length === 1 ? '' : 's'} erkannt.`;
+}
+
+function renderScanList() {
+  const el = $('#scan-list');
+  if (!el) return;
+  if (!scanList.length) { el.innerHTML = ''; return; }
+  const sum = scanList.reduce((a, e) => a + (e.price?.kombi || 0), 0);
+  el.innerHTML = `
+    <div class="card">
+      <div class="scan-head"><h2>Scan-Liste · ${scanList.length}</h2><span class="meta">Marktwert zusammen ${eur(sum)}</span></div>
+      ${scanList.map((e) => {
+        const m = e.cands[e.sel];
+        const d = e.detected;
+        return `<div class="scan-row" data-uid="${e.uid}">
+          ${img(m?.image || e.price?.image, 'low', m?.name || d.name)}
+          <div>
+            <div class="n">${esc(m ? m.name : d.name)}</div>
+            <div class="meta">${m ? `${esc(m.setName || '')} · ${esc(m.localId)}${m.official ? '/' + m.official : ''}` : 'nicht gefunden'}</div>
+            <div class="date">erkannt: ${esc(d.name)}${d.number ? ' ' + esc(d.number) + (d.total ? '/' + esc(d.total) : '') : ''} · ${esc((d.language || '').toUpperCase())}${d.variant ? ' · ' + esc(d.variant) : ''} · ${{ low: 'unsicher', medium: 'mittel', high: 'sicher' }[d.confidence]}</div>
+            ${e.cands.length > 1 ? `<select data-sel="${e.uid}" class="scan-sel">${e.cands.map((c, i) => `<option value="${i}" ${i === e.sel ? 'selected' : ''}>${esc(c.name)} · ${esc(c.setName || '')} ${esc(c.localId)}${c.official ? '/' + c.official : ''}</option>`).join('')}</select>` : ''}
+          </div>
+          <div class="right">
+            <b>${e.price?.kombi != null ? eur(e.price.kombi) : '–'}</b>
+            <span class="meta">${e.price?.trend != null ? 'CM ' + eur(e.price.trend) : ''}</span>
+            <div class="scan-actions">
+              ${m ? `<button class="small" data-open="${e.uid}">Öffnen</button><button class="small" data-cart="${e.uid}">Korb</button>` : ''}
+              <button class="x trash" data-rm="${e.uid}" aria-label="Löschen">${TRASH}</button>
+            </div>
+          </div>
+        </div>`;
+      }).join('')}
+      <div class="grid2" style="margin-top:10px">
+        <button id="scan-all-cart" class="primary">Alle in den Korb</button>
+        <button id="scan-clear" class="ghost danger">Liste leeren</button>
+      </div>
+      <p class="date">Marktwert = kombinierter Wert für Near Mint, englischer Bezugspreis. Die genaue Bewertung (Zustand, Sprache) gibt es über „Öffnen“.</p>
+    </div>`;
+  const find = (u) => scanList.find((x) => x.uid === u);
+  $$('[data-sel]', el).forEach((s) => s.addEventListener('change', async () => {
+    const e = find(s.dataset.sel); e.sel = +s.value; e.status = 'ok';
+    e.price = await priceFor(e.cands[e.sel]); saveScan(); renderScanList();
+  }));
+  $$('[data-open]', el).forEach((b) => b.addEventListener('click', () => { const e = find(b.dataset.open); const m = e.cands[e.sel]; openCard(m.lang, m.id); }));
+  $$('[data-cart]', el).forEach((b) => b.addEventListener('click', () => { quickCart(find(b.dataset.cart)); }));
+  $$('[data-rm]', el).forEach((b) => b.addEventListener('click', () => {
+    const i = scanList.findIndex((x) => x.uid === b.dataset.rm); if (i < 0) return;
+    const [e] = scanList.splice(i, 1); saveScan(); renderScanList();
+    toastUndo('Aus der Scan-Liste entfernt', () => { scanList.splice(i, 0, e); saveScan(); renderScanList(); });
+  }));
+  enableSwipe(el, '.scan-row', (u) => {
+    const i = scanList.findIndex((x) => x.uid === u);
+    if (i < 0) return null;
+    const [e] = scanList.splice(i, 1);
+    saveScan(); renderScanList();
+    return () => { scanList.splice(i, 0, e); saveScan(); renderScanList(); };
+  }, 'Aus der Scan-Liste entfernt');
+  $('#scan-all-cart').addEventListener('click', () => { let n = 0; for (const e of scanList) if (e.cands[e.sel] && quickCart(e, true)) n++; toast(`${n} Karten in den Korb gelegt`); });
+  $('#scan-clear').addEventListener('click', () => { if (confirm('Scan-Liste leeren?')) { scanList = []; saveScan(); renderScanList(); } });
+}
+
+/** Karte aus der Scan-Liste direkt in den Korb (Near Mint, Sprache der Karte). */
+function quickCart(e, silent = false) {
+  const m = e.cands[e.sel];
+  const p = e.price;
+  if (!m || !p || p.kombi == null) { if (!silent) toast('Kein Marktpreis – erst öffnen und bewerten'); return false; }
+  const sprache = tcgLangToLf(m.lang) || 'en';
+  const pf = settings.platforms[settings.platform];
+  const r = evaluate({ referenz: p.kombi, cf: settings.cf, lf: settings.lf, meinZustand: 'NM', refZustand: 'NM', meineSprache: sprache, refSprache: 'en', provision: pf.provision, versand: pf.versand, minNetto: settings.minNetto });
+  const l80 = r.ladder.find((l) => l.highlight);
+  if (cart.some((x) => !x.bought && x.cardId === m.id && x.zustand === 'NM' && x.sprache === sprache)) { if (!silent) toast('Schon im Korb'); return false; }
+  cart.push({
+    uid: uid(), cardId: m.id, lang: m.lang, name: m.name, setName: m.setName || '', localId: m.localId, official: m.official, image: m.image || p.image,
+    zustand: 'NM', sprache, markt: r.brutto, netto: r.netto, max80: l80.maxGebot, angebot: Math.floor(l80.maxGebot * 2) / 2,
+    refLabel: 'Kombinierter Marktwert', refDate: p.fetchedAt, pricing: p.pricing, gradedApi: null, grading: null, addedAt: Date.now(),
+  });
+  saveCart();
+  updateCartBtn();
+  if (!silent) toast('In den Korb gelegt');
+  return true;
+}
+
+$('#ai-cam').addEventListener('change', (e) => { aiScanFiles([...e.target.files]); e.target.value = ''; });
+$('#ai-gal').addEventListener('change', (e) => { aiScanFiles([...e.target.files]); e.target.value = ''; });
 
 // ---------- Live-Scanner ----------
 let scanner = null;
@@ -484,6 +740,9 @@ async function openCard(lang, id) {
     cur.ebayQuery = `${card.name} ${card.localId}/${card.set?.cardCount?.official ?? ''}`.trim();
     renderEval();
     if (!fx || fx.stale) loadFx();
+    getJSON(`/en/sets/${encodeURIComponent(card.set?.id || '')}`, { maxAge: 30 * 24 * 3600 * 1000 }).then((r) => {
+      if (cur && cur.card.id === card.id && r.data?.abbreviation?.official) { cur.setAbbr = r.data.abbreviation.official; renderMarket(); }
+    }).catch(() => {});
     if (!cur.enName || !card.image) {
       englishName(card.id).then((en) => {
         if (cur && cur.card.id === card.id && en) {
@@ -525,13 +784,32 @@ function effectiveCF(ppt) {
  * Cardmarket Trend + Ø 30 Tage (TCGdex), TCGplayer Near Mint (Pokemon Price Tracker, sonst TCGdex),
  * Median deiner Cardmarket-Angebote und deiner eBay-Beobachtungen.
  */
+/**
+ * Cardmarket-Werte einer Variante auf Widersprüche prüfen (Ausreißer im Preisindex, z. B. alte Karten).
+ * Rückgabe { ok, ratio, vals } – ok=false, wenn größter/kleinster Wert von Ø1/Ø7/Ø30/Trend mehr als Faktor 3 auseinanderliegen.
+ */
+function cmPlausible(cm, holo) {
+  if (!cm) return { ok: true, vals: [] };
+  const f = (k) => (holo ? k + '-holo' : k);
+  const vals = ['avg1', 'avg7', 'avg30', 'trend'].map((k) => cm[f(k)]).filter((v) => v != null && v > 0);
+  if (vals.length < 2) return { ok: true, vals };
+  const ratio = Math.max(...vals) / Math.min(...vals);
+  return { ok: ratio <= 3, ratio, vals };
+}
+
 function marketSources(pricing, ppt, offers = [], useHolo = false) {
   const out = [];
   const cm = pricing?.cardmarket;
   if (cm) {
     const f = (k) => (useHolo ? k + '-holo' : k);
-    if (cm[f('trend')] != null) out.push({ key: 'cm-trend', label: cmLabel(f('trend')), eur: cm[f('trend')], date: cm.updated });
-    if (cm[f('avg30')] != null) out.push({ key: 'cm-avg30', label: cmLabel(f('avg30')), eur: cm[f('avg30')], date: cm.updated });
+    const pl = cmPlausible(cm, useHolo);
+    if (pl.ok) {
+      if (cm[f('trend')] != null) out.push({ key: 'cm-trend', label: cmLabel(f('trend')), eur: cm[f('trend')], date: cm.updated });
+      if (cm[f('avg30')] != null) out.push({ key: 'cm-avg30', label: cmLabel(f('avg30')), eur: cm[f('avg30')], date: cm.updated });
+    } else if (pl.vals.length) {
+      // widersprüchlich: nur den niedrigsten der vier Durchschnittswerte als vorsichtige Schätzung
+      out.push({ key: 'cm-min', label: `Cardmarket vorsichtig (niedrigster Ø-Wert, Daten widersprüchlich)`, eur: Math.min(...pl.vals), date: cm.updated, unsure: true });
+    }
   }
   if (fx) {
     const nm = ppt?.conditions?.['Near Mint'];
@@ -572,9 +850,6 @@ function tpMarket(pricing) {
 
 const REF_OPTIONS = [
   ['kombi', 'Kombinierter Marktwert (alle Quellen)'],
-  ['median', 'Median der Angebote'],
-  ['mean', 'Durchschnitt der Angebote'],
-  ['min', 'Minimum der Angebote'],
   ['trend', 'Cardmarket Trendpreis'],
   ['avg7', 'Cardmarket Ø 7 Tage'],
   ['avg30', 'Cardmarket Ø 30 Tage'],
@@ -611,35 +886,6 @@ function renderEval() {
     <div class="card">
       <h2>Marktpreise</h2>
       <div id="market"></div>
-    </div>
-
-    <div class="card">
-      <h2>Marktplätze</h2>
-      <div class="links" id="links"></div>
-    </div>
-
-    <div class="card">
-      <h2>Angebote</h2>
-      <div class="grid2">
-        <select id="offer-src">
-          <option value="cm">Cardmarket</option>
-          <option value="ebay">eBay verkauft</option>
-        </select>
-        <div class="inline">
-          <input id="offer-one" inputmode="decimal" placeholder="Preis €" />
-          <button id="offer-add" class="primary">+</button>
-        </div>
-      </div>
-      <textarea id="offer-paste" placeholder="Oder mehrere Preise einfügen, z. B.&#10;12,50 €  13,00 €  14,99 €"></textarea>
-      <button id="offer-paste-btn" class="block">Eingefügte Preise übernehmen</button>
-      <div class="seg" id="offer-filter">
-        <button data-f="all">Alle</button>
-        <button data-f="cm">Cardmarket</button>
-        <button data-f="ebay">eBay</button>
-      </div>
-      <div class="offers" id="offers"></div>
-      <div class="stats" id="offer-stats"></div>
-      <button id="offer-clear" class="small ghost danger" style="margin-top:6px">Alle löschen</button>
     </div>
 
     <div class="card">
@@ -688,6 +934,10 @@ function renderEval() {
         <label>Einkaufspreis €<input id="inv-buy" inputmode="decimal" placeholder="z. B. 20" /></label>
         <label>Datum<input id="inv-date" type="date" value="${today()}" /></label>
       </div>
+      <div class="grid2">
+        <label>Gekauft über<select id="inv-wo">${optsOf(WO, 'laden', '')}</select></label>
+        <label>Art<select id="inv-art">${optsOf(ART, 'festpreis', '')}</select></label>
+      </div>
       <p class="hint" id="inv-pott"></p>
       <label class="row"><span>Status</span>
         <select id="inv-status"><option value="bestand">im Bestand</option><option value="beobachtet">beobachtet</option><option value="verkauft">verkauft</option></select>
@@ -720,44 +970,6 @@ function renderEval() {
   bind('#my-lang', 'myLang');
   bind('#platform', 'platform');
 
-  const addOffers = (vals) => {
-    const src = $('#offer-src').value;
-    for (const v of vals) cur.offers.push({ id: uid(), v, on: true, src });
-    if (cur.refAuto && cur.refType !== 'median' && cur.refType !== 'kombi') {
-      cur.refType = 'median';
-      $('#ref-type').value = 'median';
-    }
-    renderOffers();
-  };
-  $('#offer-add').addEventListener('click', () => {
-    const v = parseNum($('#offer-one').value);
-    if (v == null || v <= 0) return toast('Bitte einen Preis eingeben');
-    addOffers([v]);
-    $('#offer-one').value = '';
-    $('#offer-one').focus();
-  });
-  $('#offer-one').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') $('#offer-add').click();
-  });
-  $('#offer-paste-btn').addEventListener('click', () => {
-    const vals = parsePrices($('#offer-paste').value);
-    if (!vals.length) return toast('Keine Preise im Text gefunden');
-    addOffers(vals);
-    $('#offer-paste').value = '';
-    toast(`${vals.length} Preis(e) übernommen`);
-  });
-  $$('#offer-filter button').forEach((b) =>
-    b.addEventListener('click', () => {
-      cur.offerFilter = b.dataset.f;
-      renderOffers();
-    }),
-  );
-  $('#offer-clear').addEventListener('click', () => {
-    if (cur.offers.length && confirm('Alle Angebote löschen?')) {
-      cur.offers = [];
-      renderOffers();
-    }
-  });
   $('#inv-save').addEventListener('click', saveToInventory);
   const pottHint = () => {
     const el = $('#inv-pott');
@@ -773,8 +985,7 @@ function renderEval() {
   pottHint();
 
   renderMarket();
-  renderLinks();
-  renderOffers();
+  updateCalc();
   renderGradingSum();
   renderGraded();
   loadGradedApi(false);
@@ -931,7 +1142,11 @@ function renderMarket() {
   const ecf = effectiveCF(cur.gradedApi?.data);
   const k = ecf.cf[cur.myCond] / ecf.cf[cur.refCond];
   const adj = (v) => (v == null ? null : v * k);
-  const tabs = `<div class="seg cond-seg">${Object.keys(settings.cf).map((z) => `<button data-z="${z}" class="${z === cur.myCond ? 'on' : ''}">${z}</button>`).join('')}</div>`;
+  const hasHolo = cm && ['trend-holo', 'avg30-holo', 'avg7-holo', 'avg1-holo'].some((k) => cm[k] != null);
+  const varSeg = hasHolo ? `<div class="seg var-seg"><button data-v="0" class="${!cur.useHolo ? 'on' : ''}">Standard</button><button data-v="1" class="${cur.useHolo ? 'on' : ''}">Reverse Holo</button></div>` : '';
+  const pl = cmPlausible(cm, cur.useHolo);
+  const plWarn = cm && !pl.ok ? `<div class="warn">Die Cardmarket-Werte für ${cur.useHolo ? 'Reverse Holo' : 'Standard'} widersprechen sich (${pl.vals.map((v) => eur(v)).join(' · ')}). Das passiert bei seltenen Karten mit Ausreißern im Preisindex. Bitte auf Cardmarket oder PriceCharting gegenprüfen${hasHolo ? ' und die richtige Variante wählen' : ''}; die App rechnet vorsichtig mit dem niedrigsten Durchschnitt.</div>` : '';
+  const tabs = varSeg + `<div class="seg cond-seg">${Object.keys(settings.cf).map((z) => `<button data-z="${z}" class="${z === cur.myCond ? 'on' : ''}">${z}</button>`).join('')}</div>`;
   const note = cur.myCond === cur.refCond
     ? `<p class="date">Preise für ${condText(cur.refCond)}, so wie der Markt sie meldet.</p>`
     : `<p class="date">Umgerechnet auf ${condText(cur.myCond)}: Marktpreis × ${k.toLocaleString('de-DE', { maximumFractionDigits: 2 })} (${ecf.fromMarket ? 'aus echten TCGplayer-Zustandspreisen dieser Karte' : 'dein Zustandsfaktor'}).</p>`;
@@ -943,7 +1158,7 @@ function renderMarket() {
         ${cmRow(CM_LABEL.avg1, 'avg1')}${cmRow(CM_LABEL.avg, 'avg')}${cmRow(CM_LABEL.low, 'low')}
       </table>
       <p class="date">Preisstand Cardmarket: <b>${dt(cm.updated)}</b></p>`
-    : '<p class="hint">Für diese Karte liegen keine Cardmarket-Preise vor. Unten über den Cardmarket-Link prüfen und Angebote eintragen.</p>';
+    : '<p class="hint">Für diese Karte liegen keine Cardmarket-Preise vor. Über „Cardmarket öffnen“ prüfen.</p>';
   const money = (usdVal) => (usdVal == null ? '–' : fx ? eur(usdVal * fx.rate * k) : (usdVal * k).toLocaleString('de-DE', { style: 'currency', currency: 'USD' }));
   const tpHtml = tp && tp.variants.length
     ? `<table>
@@ -967,11 +1182,24 @@ function renderMarket() {
        <p class="date">Variante ${esc(tpVariant(ppt.printing || ''))} · Pokemon Price Tracker · abgerufen am ${dt(cur.gradedApi.fetchedAt)}${cur.gradedApi.fromCache ? ' (zwischengespeichert)' : ''}</p>`
     : (settings.pptKey ? '<p class="date" id="ppt-status"></p>' : '');
   const enN = cur.enName?.name || cur.card.name;
+  const abbr = cur.setAbbr || '';
+  const cmExact = [enN, abbr, cur.card.localId].filter(Boolean).join(' ');
+  const pcQ = [enN, cur.enName?.set || cur.card.set?.name || '', cur.card.localId].filter(Boolean).join(' ');
   const quick = `<div class="quick-links">
-      <a class="btn small" target="_blank" rel="noopener" href="https://www.cardmarket.com/de/Pokemon/Products/Search?category=-1&searchString=${encodeURIComponent(enN)}">Cardmarket öffnen ↗</a>
+      <a class="btn small primary" target="_blank" rel="noopener" href="https://www.cardmarket.com/de/Pokemon/Products/Search?category=-1&searchString=${encodeURIComponent(cmExact)}">Cardmarket: diese Karte ↗</a>
+      <a class="btn small" target="_blank" rel="noopener" href="https://www.cardmarket.com/de/Pokemon/Products/Search?category=-1&searchString=${encodeURIComponent(enN)}">Cardmarket: alle „${esc(enN)}“ ↗</a>
+      <a class="btn small" target="_blank" rel="noopener" href="https://www.pricecharting.com/search-products?type=prices&q=${encodeURIComponent('pokemon ' + pcQ)}">PriceCharting ↗</a>
       <a class="btn small" target="_blank" rel="noopener" href="https://www.ebay.de/sch/i.html?_nkw=${encodeURIComponent(cur.ebayQuery)}&LH_Sold=1&LH_Complete=1&_sop=13">eBay verkauft ↗</a>
-    </div>`;
-  el.innerHTML = tabs + note + kombHtml + quick + cmHtml + condTable + tpHtml;
+    </div>
+    <p class="date">„Diese Karte“ sucht mit Set-Kürzel und Nummer (${esc(cmExact)}). Findet Cardmarket nichts, den zweiten Link nehmen und nach Erweiterung „${esc(cur.enName?.set || cur.card.set?.name || '')}“ filtern.</p>`;
+  el.innerHTML = tabs + note + plWarn + kombHtml + quick + cmHtml + condTable + tpHtml;
+  $$('.var-seg button', el).forEach((b) => b.addEventListener('click', () => {
+    cur.useHolo = b.dataset.v === '1';
+    const sel = $('#ref-holo');
+    if (sel) sel.value = cur.useHolo ? '1' : '0';
+    renderMarket();
+    updateCalc();
+  }));
   $$('.cond-seg button', el).forEach((b) =>
     b.addEventListener('click', () => {
       cur.myCond = b.dataset.z;
@@ -1069,7 +1297,7 @@ function resolveRef() {
   }
   const cm = cur.pricing.cardmarket;
   const field = cur.useHolo ? `${t}-holo` : t;
-  if (!cm) return { error: 'Keine Cardmarket-Daten für diese Karte. Referenz „TCGplayer market“ wählen oder Angebote eintragen.' };
+  if (!cm) return { error: 'Keine Cardmarket-Daten für diese Karte. Quelle „TCGplayer Marktpreis“ oder „Eigener Wert“ wählen.' };
   const v = cm[field];
   if (v == null) return { error: `${cmLabel(field)} ist für diese Karte nicht verfügbar. Andere Quelle wählen.` };
   return { value: v, label: cmLabel(field), date: cm.updated, dateLabel: 'Preisstand', isApi: true, field };
@@ -1080,11 +1308,6 @@ function updateCalc() {
   $('#row-holo').classList.toggle('hidden', !['trend', 'avg7', 'avg30'].includes(cur.refType));
   $('#row-custom').classList.toggle('hidden', cur.refType !== 'custom');
 
-  const s = stats(activeOffers().map((o) => o.v));
-  const refKey = { median: 'median', mean: 'mean', min: 'min' }[cur.refType];
-  $('#offer-stats').innerHTML = [
-    ['count', 'Anzahl'], ['min', 'Min'], ['median', 'Median'], ['mean', 'Ø'], ['max', 'Max'],
-  ].map(([k, l]) => `<div class="${k === refKey ? 'ref' : ''}"><b>${k === 'count' ? s.count : eur(s[k])}</b><span>${l}</span></div>`).join('');
 
   const out = $('#calc-out');
   const ref = resolveRef();
@@ -1110,9 +1333,13 @@ function updateCalc() {
       <div class="val">${eur(l80.maxGebot)}</div>
       <div class="sub">Netto <b>${eur(r.netto)}</b> · Gewinn <b class="${l80.gewinn >= 0 ? 'pos' : 'neg'}">${eur(l80.gewinn)}</b> · Rendite <b>${pct(l80.rendite)}</b></div>
     </div>
+    <div class="quick-calc">
+      <label>Verkäufer will €<input id="qc-price" inputmode="decimal" placeholder="Preis eingeben" value="${cur.askPrice ? n2(cur.askPrice) : ''}" /></label>
+      <div id="qc-out"></div>
+    </div>
     <h3>Herleitung</h3>
     <div class="line"><span>Ausgangspreis: ${esc(ref.label)}</span><b>${eur(ref.value)}</b></div>
-    ${ref.sources ? `<ul class="src-list">${ref.sources.map((x) => `<li><span>${esc(x.label)} <span class="meta">${new Date(x.date).toLocaleDateString('de-DE')}</span></span><b>${eur(x.eur)}</b></li>`).join('')}</ul><p class="date">Kombiniert = Median der Quellen. Ungegradete eBay-Verkäufe gibt es per Schnittstelle nicht mehr; trag sie unter „Angebote“ als eBay ein, dann zählen sie mit.</p>` : ''}
+    ${ref.sources ? `<ul class="src-list">${ref.sources.map((x) => `<li><span>${esc(x.label)} <span class="meta">${new Date(x.date).toLocaleDateString('de-DE')}</span></span><b>${eur(x.eur)}</b></li>`).join('')}</ul><p class="date">Kombiniert = Median der Quellen.</p>` : ''}
     <p class="date">${ref.dateLabel} ${dt(ref.date)}</p>
     ${cur.myCond !== cur.refCond ? `<div class="line"><span>Zustand ${cur.myCond} statt ${cur.refCond}${ecf.fromMarket ? ' (laut echten Marktpreisen)' : ''}</span><b>× ${f2(r.zf)}</b></div>` : ''}
     ${cur.myLang !== cur.refLang ? `<div class="line"><span>Sprache ${esc(LANG_LABELS[cur.myLang] || cur.myLang)} statt ${esc(LANG_LABELS[cur.refLang] || cur.refLang)}</span><b>× ${f2(r.sf)}</b></div>` : ''}
@@ -1136,6 +1363,13 @@ function updateCalc() {
   const buy = $('#inv-buy');
   if (buy && !buy.value) buy.placeholder = `z. B. ${n2(r.ladder[1].maxGebot)} (80 %)`;
   $('#to-cart').addEventListener('click', () => addToCart(ref, r, l80));
+  const qc = () => {
+    const v = parseNum($('#qc-price').value);
+    cur.askPrice = v;
+    $('#qc-out').innerHTML = v ? verdictHtml(v, r.netto) : '<p class="date">Preis des Verkäufers eintragen, die App sagt dir, ob es sich lohnt.</p>';
+  };
+  $('#qc-price').addEventListener('input', qc);
+  qc();
   $$('.cond-table tr[data-cond]', out).forEach((tr) =>
     tr.addEventListener('click', () => {
       cur.myCond = tr.dataset.cond;
@@ -1162,6 +1396,8 @@ async function saveToInventory() {
     sprache: cur.myLang,
     zustand: cur.myCond,
     einkauf: parseNum($('#inv-buy').value),
+    ekWo: $('#inv-wo') ? $('#inv-wo').value : '',
+    ekArt: $('#inv-art') ? $('#inv-art').value : '',
     datum: $('#inv-date').value || today(),
     status: $('#inv-status').value,
     verkauf: parseNum($('#inv-sell').value),
@@ -1184,9 +1420,77 @@ async function saveToInventory() {
   toast('Zur Sammlung hinzugefügt');
 }
 
+// ---------- Rechner ----------
+/** Ampel: lohnt sich der Kauf zu `preis`, wenn nach Verkauf `netto` übrig bleibt? */
+function verdict(preis, netto) {
+  const gewinn = netto - preis;
+  const rendite = preis > 0 ? gewinn / preis : null;
+  const lvl = rendite == null ? 'bad' : rendite >= 0.25 && netto >= settings.minNetto * 0 ? 'good' : rendite >= 0.1 ? 'ok' : 'bad';
+  const text = { good: 'Lohnt sich', ok: 'Knapp – nachverhandeln', bad: 'Lohnt sich nicht' }[lvl];
+  return { gewinn, rendite, lvl, text, maxPreis: netto * 0.8 };
+}
+function verdictHtml(preis, netto) {
+  const v = verdict(preis, netto);
+  return `<div class="verdict ${v.lvl}">
+    <b>${v.text}</b>
+    <span>Gewinn ${eur(v.gewinn)} · Rendite ${v.rendite != null ? pct(v.rendite) : '–'}</span>
+    <span class="meta">Für 25 % Rendite höchstens ${eur(netto / 1.25)} zahlen</span>
+  </div>`;
+}
+
+const calcState = { single: { ek: null, vk: null }, rows: [], seller: null };
+function renderCalc() {
+  const el = $('#calc');
+  const pf = settings.platforms[settings.platform];
+  const s1 = calcState.single;
+  const netto1 = s1.vk != null ? s1.vk * (1 - pf.provision) - pf.versand : null;
+  const rowsNetto = calcState.rows.reduce((a, r) => a + (r.v ? r.v * (1 - pf.provision) - pf.versand : 0), 0);
+  const rowsMarkt = calcState.rows.reduce((a, r) => a + (r.v || 0), 0);
+  el.innerHTML = `
+    <div class="card">
+      <h2>Einzelkarte</h2>
+      <div class="grid2">
+        <label>Einkauf (Verkäufer will) €<input id="c1-ek" inputmode="decimal" value="${s1.ek != null ? n2(s1.ek) : ''}" placeholder="z. B. 20" /></label>
+        <label>Verkaufswert (z. B. CM-Trend) €<input id="c1-vk" inputmode="decimal" value="${s1.vk != null ? n2(s1.vk) : ''}" placeholder="z. B. 30" /></label>
+      </div>
+      <p class="date">Verkauf über ${esc(pf.label)}: ${fmt1(pf.provision * 100)} % Gebühr, ${eur(pf.versand)} Versand (änderbar unter Optionen).</p>
+      ${s1.ek != null && netto1 != null ? `<div class="line"><span>Nach Gebühr und Versand</span><b>${eur(netto1)}</b></div>` + verdictHtml(s1.ek, netto1) : ''}
+    </div>
+    <div class="card">
+      <h2>Sammelankauf</h2>
+      <p class="hint">Verkaufswert jeder Karte eintragen (oder aus dem Korb übernehmen), dazu den Gesamtpreis des Verkäufers.</p>
+      <div id="c-rows">
+        ${calcState.rows.map((r, i) => `<div class="inline c-row"><input data-rn="${i}" placeholder="Karte (optional)" value="${esc(r.n || '')}" /><input data-rv="${i}" inputmode="decimal" placeholder="Wert €" value="${r.v != null ? n2(r.v) : ''}" class="c-val" /><button class="x trash" data-rx="${i}" aria-label="Löschen">${TRASH}</button></div>`).join('')}
+      </div>
+      <div class="grid2" style="margin-top:8px">
+        <button id="c-add">+ Karte</button>
+        <button id="c-from-cart" ${cart.length ? '' : 'disabled'}>Aus Korb (${cart.length})</button>
+      </div>
+      <label class="row" style="margin-top:10px"><span>Verkäufer will gesamt €</span><input id="c-seller" inputmode="decimal" value="${calcState.seller != null ? n2(calcState.seller) : ''}" placeholder="z. B. 150" /></label>
+      ${calcState.rows.length ? `
+        <div class="line"><span>${calcState.rows.length} Karten · Verkaufswert</span><b>${eur(rowsMarkt)}</b></div>
+        <div class="line"><span>Nach Gebühr und Versand (je Karte)</span><b>${eur(rowsNetto)}</b></div>
+        <div class="line"><span>Höchstgebot (80 %)</span><b>${eur(rowsNetto * 0.8)}</b></div>
+        ${calcState.seller != null ? verdictHtml(calcState.seller, rowsNetto) : ''}` : ''}
+      ${calcState.rows.length ? '<button id="c-clear" class="block ghost danger">Liste leeren</button>' : ''}
+    </div>`;
+  const num = (sel, fn) => { const e = $(sel); if (e) e.addEventListener('change', () => { fn(parseNum(e.value)); renderCalc(); }); };
+  num('#c1-ek', (v) => (s1.ek = v));
+  num('#c1-vk', (v) => (s1.vk = v));
+  num('#c-seller', (v) => (calcState.seller = v));
+  $$('[data-rv]', el).forEach((e) => e.addEventListener('change', () => { calcState.rows[+e.dataset.rv].v = parseNum(e.value); renderCalc(); }));
+  $$('[data-rn]', el).forEach((e) => e.addEventListener('change', () => { calcState.rows[+e.dataset.rn].n = e.value; }));
+  $$('[data-rx]', el).forEach((e) => e.addEventListener('click', () => { calcState.rows.splice(+e.dataset.rx, 1); renderCalc(); }));
+  $('#c-add').addEventListener('click', () => { calcState.rows.push({ n: '', v: null }); renderCalc(); const ins = $$('.c-val', el); if (ins.length) ins[ins.length - 1].focus(); });
+  $('#c-from-cart').addEventListener('click', () => { calcState.rows = cart.map((it) => ({ n: it.name, v: Math.round(it.markt * 100) / 100 })); renderCalc(); });
+  const cl = $('#c-clear');
+  if (cl) cl.addEventListener('click', () => { calcState.rows = []; calcState.seller = null; renderCalc(); });
+}
+
 // ---------- Ankaufskorb ----------
 let cart = [];
 let cartRabatt = null; // null = Vorschlag nach Stückzahl
+let cartSeller = null;
 const rabattVorschlag = (n) => (n >= 20 ? 0.15 : n >= 10 ? 0.1 : n >= 5 ? 0.05 : 0);
 const saveCart = () => kvSet('cart', { items: cart, rabatt: cartRabatt });
 async function loadCart() {
@@ -1195,9 +1499,12 @@ async function loadCart() {
   updateCartBtn();
 }
 function cartTotals() {
-  const rab = cartRabatt ?? rabattVorschlag(cart.length);
+  const rab = cartRabatt ?? rabattVorschlag(cart.filter((it) => !it.bought).length);
   const t = { n: cart.length, markt: 0, netto: 0, max80: 0, angebot: 0, rab };
-  for (const it of cart) { t.markt += it.markt || 0; t.netto += it.netto || 0; t.max80 += it.max80 || 0; t.angebot += it.angebot || 0; }
+  const open = cart.filter((it) => !it.bought);
+  t.n = open.length;
+  t.bought = cart.length - open.length;
+  for (const it of open) { t.markt += it.markt || 0; t.netto += it.netto || 0; t.max80 += it.max80 || 0; t.angebot += it.angebot || 0; }
   t.gesamt = t.angebot * (1 - rab);
   t.gewinn = t.netto - t.gesamt;
   t.rendite = t.gesamt > 0 ? t.gewinn / t.gesamt : null;
@@ -1206,14 +1513,17 @@ function cartTotals() {
 function updateCartBtn() {
   const b = $('#cart-btn');
   if (!b) return;
-  b.classList.toggle('hidden', !cart.length);
-  if (cart.length) b.textContent = `Korb ${cart.length} · ${eur(cartTotals().gesamt)}`;
+  const t = cartTotals();
+  b.classList.toggle('hidden', !t.n);
+  if (t.n) b.textContent = `Korb ${t.n} · ${eur(t.gesamt)}`;
 }
 $('#cart-btn').addEventListener('click', () => show('cart'));
+$('#open-cart').addEventListener('click', () => show('cart'));
+$('#open-calc').addEventListener('click', () => show('calc'));
 
 function addToCart(ref, r, l80) {
   const c = cur.card;
-  const existing = cart.find((x) => x.cardId === c.id && x.zustand === cur.myCond && x.sprache === cur.myLang);
+  const existing = cart.find((x) => !x.bought && x.cardId === c.id && x.zustand === cur.myCond && x.sprache === cur.myLang);
   const item = {
     uid: existing?.uid || uid(), cardId: c.id, lang: cur.lang, name: c.name, setName: c.set?.name || '', localId: c.localId,
     official: c.set?.cardCount?.official ?? null, image: c.image || null, zustand: cur.myCond, sprache: cur.myLang,
@@ -1226,7 +1536,7 @@ function addToCart(ref, r, l80) {
   else cart.push(item);
   saveCart();
   updateCartBtn();
-  toast(existing ? 'Im Korb aktualisiert' : `In den Korb gelegt (${cart.length})`);
+  toast(existing ? 'Im Korb aktualisiert' : `In den Korb gelegt (${cartTotals().n})`);
 }
 
 function renderCart() {
@@ -1239,7 +1549,16 @@ function renderCart() {
     el.innerHTML = '<p class="empty">Der Korb ist leer. In der Bewertung „In den Ankaufskorb“ antippen.</p>';
     return;
   }
-  const vors = rabattVorschlag(cart.length);
+  if (!t.n) {
+    el.innerHTML = `<div class="card"><p class="empty" style="padding:20px 0">Alle ${t.bought} Karten im Korb sind gekauft und in der Sammlung.</p>
+      <button id="cart-rm-bought2" class="block">Gekaufte aus dem Korb entfernen</button></div>
+      <div class="card">${cart.map((it) => `<div class="cart-item bought">${img(it.image, 'low', it.name)}<div><div class="n">${esc(it.name)}</div><div class="meta">${esc(it.setName)} · ${esc(it.localId)}</div></div><div class="right"><span class="tag">gekauft ${eur(it.paid)}</span></div></div>`).join('')}</div>`;
+    $('#cart-rm-bought2').addEventListener('click', () => { cart = []; saveCart(); renderCart(); updateCartBtn(); });
+    return;
+  }
+  const vors = rabattVorschlag(t.n);
+  const openItems = cart.filter((it) => !it.bought);
+  const boughtItems = cart.filter((it) => it.bought);
   el.innerHTML = `
     <div class="card">
       <div class="hero">
@@ -1261,15 +1580,18 @@ function renderCart() {
         <div class="line"><span>Pott jetzt → nach dem Kauf</span><b class="${pf.kasse - t.gesamt < 0 ? 'neg' : ''}">${eur(pf.kasse)} → ${eur(pf.kasse - t.gesamt)}</b></div>
       </div>
       ${t.angebot > t.max80 + 0.01 ? '<div class="warn">Deine Einzelangebote liegen über den 80-%-Höchstgeboten. Der Flip wird dünner.</div>' : ''}
+      <label class="row" style="margin-top:10px"><span>Verkäufer will gesamt €</span><input id="cart-seller" inputmode="decimal" value="${cartSeller != null ? n2(cartSeller) : ''}" placeholder="optional" /></label>
+      ${cartSeller != null ? verdictHtml(cartSeller, t.netto) : ''}
       <div class="grid2" style="margin-top:12px">
         <button id="cart-share">Angebot teilen</button>
         <button id="cart-buy" class="primary">Alle gekauft</button>
       </div>
+      ${t.bought ? `<button id="cart-rm-bought" class="block ghost">${t.bought} gekaufte entfernen</button>` : ''}
       <button id="cart-clear" class="block ghost danger">Korb leeren</button>
     </div>
     <div class="card">
-      ${cart.map((it) => `
-        <div class="cart-item" data-uid="${it.uid}">
+      ${[...openItems, ...boughtItems].map((it) => `
+        <div class="cart-item ${it.bought ? 'bought' : ''}" data-uid="${it.uid}">
           ${img(it.image, 'low', it.name)}
           <div>
             <div class="n">${esc(it.name)}</div>
@@ -1277,8 +1599,8 @@ function renderCart() {
             <div class="meta">Wert ${eur(it.markt)} · höchstens ${eur(it.max80)}${t.rab ? ` · nach Rabatt ${eur(it.angebot * (1 - t.rab))}` : ''}</div>
           </div>
           <div class="right">
-            <input class="offer-in" data-off="${it.uid}" inputmode="decimal" value="${n2(it.angebot)}" aria-label="Mein Angebot" />
-            <button class="x" data-rm="${it.uid}" aria-label="entfernen">×</button>
+            ${it.bought ? `<span class="tag">gekauft ${eur(it.paid)}</span>` : `<input class="offer-in" data-off="${it.uid}" inputmode="decimal" value="${n2(it.angebot)}" aria-label="Mein Angebot" />`}
+            <button class="x trash" data-rm="${it.uid}" aria-label="Löschen">${TRASH}</button>
           </div>
         </div>`).join('')}
       <p class="date">Einzelangebote sind mit dem 80-%-Höchstgebot vorbelegt (auf 0,50 € abgerundet) und änderbar. Werte nach Zustand und Sprache, Stand der Bewertung.</p>
@@ -1297,10 +1619,24 @@ function renderCart() {
     if (v == null || v < 0) return toast('Ungültiger Preis');
     it.angebot = v; saveCart(); renderCart(); updateCartBtn();
   }));
-  $$('[data-rm]', el).forEach((b) => b.addEventListener('click', () => { cart = cart.filter((x) => x.uid !== b.dataset.rm); saveCart(); renderCart(); updateCartBtn(); }));
+  $$('[data-rm]', el).forEach((b) => b.addEventListener('click', () => {
+    const i = cart.findIndex((x) => x.uid === b.dataset.rm); if (i < 0) return;
+    const [it] = cart.splice(i, 1); saveCart(); renderCart(); updateCartBtn();
+    toastUndo('Aus dem Korb entfernt', () => { cart.splice(i, 0, it); saveCart(); renderCart(); updateCartBtn(); });
+  }));
+  enableSwipe(el, '.cart-item', (u) => {
+    const i = cart.findIndex((x) => x.uid === u);
+    if (i < 0) return null;
+    const [it] = cart.splice(i, 1);
+    saveCart(); renderCart(); updateCartBtn();
+    return () => { cart.splice(i, 0, it); saveCart(); renderCart(); updateCartBtn(); };
+  }, 'Aus dem Korb entfernt');
+  const rmb = $('#cart-rm-bought');
+  if (rmb) rmb.addEventListener('click', () => { cart = cart.filter((x) => !x.bought); saveCart(); renderCart(); });
+  $('#cart-seller').addEventListener('change', (e) => { cartSeller = parseNum(e.target.value); renderCart(); });
   $('#cart-clear').addEventListener('click', () => { if (confirm('Korb leeren?')) { cart = []; cartRabatt = null; saveCart(); renderCart(); updateCartBtn(); } });
   $('#cart-share').addEventListener('click', async () => {
-    const lines = cart.map((it) => `${it.name} (${it.setName} ${it.localId}${it.official ? '/' + it.official : ''}, ${it.zustand}): ${eur(it.angebot)}`);
+    const lines = cart.filter((it) => !it.bought).map((it) => `${it.name} (${it.setName} ${it.localId}${it.official ? '/' + it.official : ''}, ${it.zustand}): ${eur(it.angebot)}`);
     const text = `Mein Angebot für ${t.n} Karten:\n${lines.join('\n')}\n\nSumme: ${eur(t.angebot)}${t.rab ? `\nMengenrabatt ${fmt1(t.rab * 100)} %: − ${eur(t.angebot - t.gesamt)}` : ''}\nGesamtangebot: ${eur(t.gesamt)}`;
     try {
       if (navigator.share) { await navigator.share({ title: 'Angebot', text }); return; }
@@ -1308,8 +1644,11 @@ function renderCart() {
     try { await navigator.clipboard.writeText(text); toast('Angebot kopiert'); } catch { prompt('Angebot kopieren:', text); }
   });
   $('#cart-buy').addEventListener('click', async () => {
+    if (!t.n) return toast('Keine offenen Karten im Korb');
     if (!confirm(`Alle ${t.n} Karten für zusammen ${eur(t.gesamt)} in die Sammlung übernehmen?`)) return;
-    for (const it of cart) {
+    for (const it of cart.filter((x) => !x.bought)) {
+      it.bought = true;
+      it.paid = Math.round(it.angebot * (1 - t.rab) * 100) / 100;
       await db.put('inventory', {
         uid: uid(), id: it.cardId, lang: it.lang, name: it.name, setName: it.setName, setId: setIdOf({ id: it.cardId, localId: it.localId }),
         localId: it.localId, official: it.official, image: it.image, sprache: it.sprache, zustand: it.zustand,
@@ -1319,8 +1658,8 @@ function renderCart() {
       });
     }
     inventory = await db.all('inventory');
-    cart = []; cartRabatt = null; saveCart(); updateCartBtn();
-    toast(`${t.n} Karten in die Sammlung übernommen`);
+    cartRabatt = null; cartSeller = null; saveCart(); updateCartBtn();
+    toast(`${t.n} Karten in die Sammlung übernommen (im Korb als gekauft markiert)`);
     show('inv');
   });
 }
@@ -1353,6 +1692,11 @@ function itemValue(it) {
 }
 
 let invFilter = 'all';
+const WO = { laden: 'Laden', ebay: 'eBay', cardmarket: 'Cardmarket', privat: 'Privat', messe: 'Messe/Börse', sonst: 'Sonstiges' };
+const ART = { sofort: 'Sofort-Kaufen', auktion: 'Auktion', vorschlag: 'Preisvorschlag', festpreis: 'Festpreis', tausch: 'Tausch' };
+const BEW = { '': '–', positiv: 'positiv', neutral: 'neutral', negativ: 'negativ' };
+const optsOf = (map, val, empty) => (empty ? `<option value="">${empty}</option>` : '') + Object.entries(map).map(([k, l]) => `<option value="${k}" ${k === val ? 'selected' : ''}>${l}</option>`).join('');
+const dealText = (wo, art, partner, bew, abg) => [wo ? WO[wo] : '', art ? ART[art] : '', partner ? 'mit ' + partner : '', bew ? `Bewertung ${BEW[bew]}${abg ? ', abgegeben' : ''}` : ''].filter(Boolean).join(' · ');
 const flipCfg = () => ({ start: 0, undercut: 0.05, marge: 0.2, ...(settings.flip || {}) });
 const itemPlatform = (it) => settings.platforms[it.vkPlattform] || settings.platforms[settings.platform] || settings.platforms.cardmarket;
 
@@ -1361,6 +1705,7 @@ function renderInventory() {
   const cfg = flipCfg();
   const items = inventory.slice().sort((a, b) => b.createdAt - a.createdAt);
   const pf = portfolio(items, { start: cfg.start, marktwert: (it) => itemValue(it).value, platform: itemPlatform, erloes: (it) => itemCalc(it).netto });
+  const portWert = items.filter((it) => it.status === 'bestand').reduce((a, it) => a + (itemValue(it).value || 0), 0);
   const shown = items.filter((it) => invFilter === 'all' || it.status === invFilter);
   const counts = { all: items.length, bestand: 0, verkauft: 0, beobachtet: 0 };
   for (const it of items) counts[it.status] = (counts[it.status] || 0) + 1;
@@ -1370,14 +1715,15 @@ function renderInventory() {
   el.innerHTML = `
     <div class="card">
       <div class="hero">
-        <div class="lbl">Kasse · verfügbar für Einkäufe</div>
-        <div class="val ${pf.kasse < 0 ? 'neg' : ''}">${eur(pf.kasse)}</div>
-        <div class="sub">Gesamtvermögen <b>${eur(pf.gesamt)}</b>${pf.rendite != null ? ` · <b class="${cls(pf.rendite)}">${sign(pf.rendite)}${pct(pf.rendite)}</b> seit Start` : ''}</div>
+        <div class="lbl">Portfolio-Wert · ${counts.bestand || 0} Karten im Bestand</div>
+        <div class="val">${eur(portWert)}</div>
+        <div class="sub"><b class="${cls(portWert - pf.gebunden)}">${sign(portWert - pf.gebunden)}${eur(portWert - pf.gebunden)}</b>${pf.gebunden > 0 ? ` (<span class="${cls(portWert - pf.gebunden)}">${sign(portWert - pf.gebunden)}${pct((portWert - pf.gebunden) / pf.gebunden)}</span>)` : ''} gegenüber Einkauf ${eur(pf.gebunden)}</div>
       </div>
-      ${pf.kasse < 0 ? '<div class="warn">Du hast mehr eingekauft, als im Pott war. Startkapital erhöhen oder erst verkaufen.</div>' : ''}
+      ${cfg.start > 0 ? `<div class="kasse-line"><span>Kasse (Pott)</span><b class="${pf.kasse < 0 ? 'neg' : ''}">${eur(pf.kasse)}</b><span class="meta">Gesamtvermögen ${eur(pf.gesamt)}${pf.rendite != null ? ` · ${sign(pf.rendite)}${pct(pf.rendite)} seit Start` : ''}</span></div>` : ''}
+      ${cfg.start > 0 && pf.kasse < 0 ? '<div class="warn">Du hast mehr eingekauft, als im Pott war. Startkapital erhöhen oder erst verkaufen.</div>' : ''}
       <div class="sum">
-        <div><span>Startkapital (Pott)</span><b>${eur(pf.start)}</b></div>
-        <div><span>Gebunden in Karten (Einkauf)</span><b>${eur(pf.gebunden)}</b></div>
+        <div><span>Marktwert (Cardmarket & Co.)</span><b>${eur(portWert)}</b></div>
+        <div><span>Bezahlt (Einkauf)</span><b>${eur(pf.gebunden)}</b></div>
         <div><span>Lagerwert, realistisch verkauft</span><b>${eur(pf.lagerwert)}</b></div>
         <div><span>Unrealisiert</span><b class="${cls(pf.lagerwert - pf.gebunden)}">${sign(pf.lagerwert - pf.gebunden)}${eur(pf.lagerwert - pf.gebunden)}</b></div>
         <div><span>Deckungsbeitrag realisiert</span><b class="${cls(pf.dbSumme)}">${sign(pf.dbSumme)}${eur(pf.dbSumme)}</b></div>
@@ -1424,6 +1770,14 @@ function renderInventory() {
   $('#inv-csv').addEventListener('click', exportCsv);
   $$('#inv-filter button').forEach((b) => b.addEventListener('click', () => { invFilter = b.dataset.f; renderInventory(); }));
   $$('.inv-item', el).forEach(bindInvItem);
+  enableSwipe(el, '.inv-item', (u) => {
+    const it = inventory.find((x) => x.uid === u);
+    if (!it) return null;
+    db.del('inventory', u);
+    inventory = inventory.filter((x) => x.uid !== u);
+    renderInventory();
+    return async () => { await db.put('inventory', it); inventory = await db.all('inventory'); renderInventory(); };
+  }, 'Aus der Sammlung gelöscht');
   if (openItemUid) {
     const d = $(`.inv-item[data-uid="${openItemUid}"] details`, el);
     if (d) { d.open = true; d.scrollIntoView({ block: 'center' }); }
@@ -1449,7 +1803,7 @@ function invItemHtml(it) {
     const r = verkaufsErgebnis({ verkauf: it.verkauf, provision: p.provision, versand: Number.isFinite(it.vkVersand) ? it.vkVersand : p.versand, einkauf: it.einkauf });
     const days = it.vkDatum && it.datum ? Math.max(0, Math.round((new Date(it.vkDatum) - new Date(it.datum)) / 86400000)) : null;
     right = `<span class="meta">Deckungsbeitrag</span><b class="${cls(r.db)}">${sign(r.db)}${eur(r.db)}</b>${r.roi != null ? `<span class="meta ${cls(r.db)}">${sign(r.roi)}${pct(r.roi)}</span>` : ''}`;
-    calc = `<div class="meta">Verkauft für <b>${eur(it.verkauf)}</b> über ${esc(p.label)}${it.vkDatum ? ' am ' + new Date(it.vkDatum).toLocaleDateString('de-DE') : ''} · netto ${eur(r.netto)}${days != null ? ` · ${days} Tage gehalten` : ''}</div>`;
+    calc = `<div class="meta">Verkauft für <b>${eur(it.verkauf)}</b> über ${esc(p.label)}${it.vkArt ? ' (' + ART[it.vkArt] + ')' : ''}${it.vkDatum ? ' am ' + new Date(it.vkDatum).toLocaleDateString('de-DE') : ''} · netto ${eur(r.netto)}${days != null ? ` · ${days} Tage gehalten` : ''}</div>${it.vkPartner || it.vkBew ? `<div class="date">${esc(dealText('', '', it.vkPartner, it.vkBew, it.vkAbg))}</div>` : ''}`;
   } else if (it.status === 'bestand') {
     const k = itemCalc(it);
     right = k.angebot != null
@@ -1472,13 +1826,14 @@ function invItemHtml(it) {
     <div>
       <div class="n">${esc(it.name)}</div>
       <div class="meta">${esc(it.setName)} · Nr. ${esc(it.localId)}${it.official ? '/' + it.official : ''} · ${esc(LANG_LABELS[it.sprache] || it.sprache)} · ${esc(it.zustand)}</div>
-      <div class="meta"><span class="tag">${statusLbl}</span> gekauft ${it.datum ? new Date(it.datum).toLocaleDateString('de-DE') : '–'}${it.grading ? ` <span class="grade-badge">PSA ~${it.grading.overall}</span>` : ''}</div>
+      <div class="meta"><span class="tag">${statusLbl}</span> gekauft ${it.datum ? new Date(it.datum).toLocaleDateString('de-DE') : '–'}${it.einkauf != null ? ' für ' + eur(it.einkauf) : ''}${it.grading ? ` <span class="grade-badge">PSA ~${it.grading.overall}</span>` : ''}</div>
+      ${it.ekWo || it.ekArt || it.ekPartner || it.ekBew ? `<div class="date">Einkauf: ${esc(dealText(it.ekWo, it.ekArt, it.ekPartner, it.ekBew, it.ekAbg))}</div>` : ''}
       ${calc}
       ${v.ref != null ? `<div class="date">${esc(v.src)}: ${eur(v.ref)} · Stand ${dt(v.date)}</div>` : '<div class="date">Kein Marktpreis vorhanden</div>'}
       ${it.notiz ? `<div class="meta">${esc(it.notiz)}</div>` : ''}
     </div>
     <div class="right">${right}</div>
-    ${it.status === 'bestand' ? `<div class="item-actions"><button class="small" data-act="sold">Verkauft</button><button class="small ghost" data-act="open">Neu bewerten</button></div>` : ''}
+    <div class="item-actions">${it.status === 'bestand' ? '<button class="small" data-act="sold">Verkauft</button><button class="small ghost" data-act="open">Neu bewerten</button>' : ''}<button class="x trash" data-act="trash" aria-label="Löschen">${TRASH}</button></div>
     <details>
       <summary>Bearbeiten</summary>
       <div class="grid2">
@@ -1488,17 +1843,29 @@ function invItemHtml(it) {
           <option value="beobachtet" ${it.status === 'beobachtet' ? 'selected' : ''}>beobachtet</option>
         </select></label>
         <label>Zustand<select data-k="zustand">${Object.keys(settings.cf).map((k) => `<option ${k === it.zustand ? 'selected' : ''}>${k}</option>`).join('')}</select></label>
-        <label>Einkauf €<input data-k="einkauf" inputmode="decimal" value="${it.einkauf ?? ''}" /></label>
-        <label>Kaufdatum<input data-k="datum" type="date" value="${esc(it.datum)}" /></label>
         <label>Sprache<select data-k="sprache">${Object.keys(settings.lf).map((k) => `<option value="${k}" ${k === it.sprache ? 'selected' : ''}>${LANG_LABELS[k] || k}</option>`).join('')}</select></label>
-        <label>Verkauf über<select data-k="vkPlattform">${Object.entries(settings.platforms).map(([k, x]) => `<option value="${k}" ${k === (it.vkPlattform || settings.platform) ? 'selected' : ''}>${esc(x.label)}</option>`).join('')}</select></label>
       </div>
+      <h3>Einkauf</h3>
+      <div class="grid2">
+        <label>Bezahlt €<input data-k="einkauf" inputmode="decimal" value="${it.einkauf ?? ''}" /></label>
+        <label>Kaufdatum<input data-k="datum" type="date" value="${esc(it.datum)}" /></label>
+        <label>Gekauft über<select data-k="ekWo">${optsOf(WO, it.ekWo, 'wählen')}</select></label>
+        <label>Art<select data-k="ekArt">${optsOf(ART, it.ekArt, 'wählen')}</select></label>
+        <label>Verkäufer<input data-k="ekPartner" value="${esc(it.ekPartner || '')}" placeholder="Name / Shop" /></label>
+        <label>Bewertung<select data-k="ekBew">${optsOf(BEW, it.ekBew || '')}</select></label>
+      </div>
+      <label class="check-inline"><input type="checkbox" data-k="ekAbg" ${it.ekAbg ? 'checked' : ''}/> Bewertung abgegeben</label>
       <h3>Verkauf</h3>
       <div class="grid2">
         <label>Verkaufspreis €<input data-k="verkauf" inputmode="decimal" value="${it.verkauf ?? ''}" /></label>
         <label>Verkaufsdatum<input data-k="vkDatum" type="date" value="${esc(it.vkDatum || '')}" /></label>
+        <label>Verkauf über<select data-k="vkPlattform">${Object.entries(settings.platforms).map(([k, x]) => `<option value="${k}" ${k === (it.vkPlattform || settings.platform) ? 'selected' : ''}>${esc(x.label)}</option>`).join('')}</select></label>
         <label>Versand tatsächlich €<input data-k="vkVersand" inputmode="decimal" placeholder="${n2(p.versand)}" value="${it.vkVersand ?? ''}" /></label>
+        <label>Art<select data-k="vkArt">${optsOf(ART, it.vkArt, 'wählen')}</select></label>
+        <label>Käufer<input data-k="vkPartner" value="${esc(it.vkPartner || '')}" placeholder="Name" /></label>
+        <label>Bewertung<select data-k="vkBew">${optsOf(BEW, it.vkBew || '')}</select></label>
       </div>
+      <label class="check-inline"><input type="checkbox" data-k="vkAbg" ${it.vkAbg ? 'checked' : ''}/> Bewertung abgegeben</label>
       <label>Notiz<input data-k="notiz" value="${esc(it.notiz)}" /></label>
       ${it.grading ? gradingDocHtml(it.grading) : ''}
       <div class="grid2" style="margin-top:8px">
@@ -1535,7 +1902,7 @@ function bindInvItem(row) {
   $$('[data-k]', row).forEach((inp) =>
     inp.addEventListener('change', async () => {
       const k = inp.dataset.k;
-      it[k] = ['einkauf', 'verkauf', 'vkVersand'].includes(k) ? parseNum(inp.value) : inp.value;
+      it[k] = ['einkauf', 'verkauf', 'vkVersand'].includes(k) ? parseNum(inp.value) : inp.type === 'checkbox' ? inp.checked : inp.value;
       if (k === 'verkauf' && it[k] != null && it.status !== 'verkauft') {
         it.status = 'verkauft';
         it.vkDatum = it.vkDatum || today();
@@ -1559,15 +1926,18 @@ function bindInvItem(row) {
     it.vkPlattform = it.vkPlattform || settings.platform;
     await db.put('inventory', it);
     const r = verkaufsErgebnis({ verkauf: v, provision: p.provision, versand: p.versand, einkauf: it.einkauf });
-    toast(`Verkauft – Deckungsbeitrag ${r.db >= 0 ? '+' : ''}${eur(r.db)}`);
+    toast(`Verkauft – Deckungsbeitrag ${r.db >= 0 ? '+' : ''}${eur(r.db)}. Art, Käufer und Bewertung unten ergänzen.`);
+    openItemUid = it.uid;
     renderInventory();
   });
-  $('[data-act=del]', row).addEventListener('click', async () => {
-    if (!confirm(`„${it.name}“ löschen?`)) return;
+  const delWithUndo = async () => {
     await db.del('inventory', it.uid);
     inventory = inventory.filter((x) => x.uid !== it.uid);
     renderInventory();
-  });
+    toastUndo(`„${it.name}“ gelöscht`, async () => { await db.put('inventory', it); inventory = await db.all('inventory'); renderInventory(); });
+  };
+  $('[data-act=del]', row)?.addEventListener('click', delWithUndo);
+  $('[data-act=trash]', row)?.addEventListener('click', delWithUndo);
   $$('[data-act=open]', row).forEach((b) => b.addEventListener('click', () => openCard(it.lang, it.id)));
   const rep = $('[data-act=report]', row);
   if (rep) rep.addEventListener('click', () => shareReport({ name: it.name, sub: `${it.setName} · Nr. ${it.localId}${it.official ? '/' + it.official : ''}` }, it.grading, toast));
@@ -1575,7 +1945,8 @@ function bindInvItem(row) {
 
 function exportCsv() {
   const cols = ['tcgdex_id', 'name', 'set', 'nummer', 'sprache', 'zustand', 'status', 'einkauf_eur', 'kaufdatum', 'marktwert_eur', 'angebotspreis_eur', 'mindestpreis_eur', 'zielpreis_eur',
-    'verkauf_eur', 'verkaufsdatum', 'plattform', 'netto_erloes_eur', 'deckungsbeitrag_eur', 'rendite_prozent', 'preisquelle', 'preisstand', 'notiz'];
+    'verkauf_eur', 'verkaufsdatum', 'plattform', 'netto_erloes_eur', 'deckungsbeitrag_eur', 'rendite_prozent', 'preisquelle', 'preisstand', 'notiz',
+    'einkauf_wo', 'einkauf_art', 'verkaeufer', 'einkauf_bewertung', 'verkauf_art', 'kaeufer', 'verkauf_bewertung'];
   const q = (v) => {
     const s = v == null ? '' : String(v);
     return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -1590,7 +1961,8 @@ function exportCsv() {
     return [it.id, it.name, it.setName, `${it.localId}${it.official ? '/' + it.official : ''}`, it.sprache, it.zustand, it.status,
       num(it.einkauf), it.datum, num(v.value), num(k.angebot), num(k.breakEven), num(k.zielpreis),
       num(it.verkauf), it.vkDatum || '', it.status === 'verkauft' ? p.label : '', num(r?.netto), num(r?.db), r?.roi != null ? (r.roi * 100).toFixed(1).replace('.', ',') : '',
-      v.src || '', iso(v.date), it.notiz];
+      v.src || '', iso(v.date), it.notiz,
+      it.ekWo ? WO[it.ekWo] : '', it.ekArt ? ART[it.ekArt] : '', it.ekPartner || '', it.ekBew || '', it.vkArt ? ART[it.vkArt] : '', it.vkPartner || '', it.vkBew || ''];
   });
   const csv = '﻿' + [cols, ...rows].map((r) => r.map(q).join(';')).join('\r\n');
   const a = document.createElement('a');
@@ -1861,6 +2233,7 @@ function initGrading() {
   renderLangSelect();
   initGrading();
   loadCart();
+  loadScan();
   try { inventory = await db.all('inventory'); } catch { inventory = []; }
   refreshState.last = await kvGet('lastRefresh', null);
   probeLanguages()

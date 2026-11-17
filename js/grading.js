@@ -322,6 +322,39 @@ export function checklistLines(c) {
   return L;
 }
 
+/** Gesamtnoten aus Teilnoten + Zentrierung: PSA ganzzahlig, CGC/BGS in halben Noten (Richtwerte). */
+export function gradeSummary({ worstFront, worstBack, corners, edges, surface, creaseCap = 10 }) {
+  const floorHalf = (v) => Math.floor(v * 2) / 2;
+  const cPsa = capFor(PSA_CENTERING, worstFront, worstBack, 2);
+  const cCgc = capFor(CGC_CENTERING, worstFront, worstBack, 5);
+  const cBgs = capFor(BGS_CENTERING, worstFront, worstBack, 5);
+  const low = Math.min(corners, edges, surface);
+  const psa = Math.max(1, Math.min(creaseCap, cPsa, Math.floor(low)));
+  const subs4 = [cBgs, corners, edges, surface];
+  const avg = subs4.reduce((a, b) => a + b, 0) / 4;
+  const lowB = Math.min(...subs4);
+  let bgs = Math.min(floorHalf(avg), lowB + 1);
+  if (bgs >= 10 && lowB < 9.5) bgs = 9.5;
+  const cgcSubs = [cCgc, corners, edges, surface];
+  const lowC = Math.min(...cgcSubs);
+  const cgc = floorHalf(Math.min(cgcSubs.reduce((a, b) => a + b, 0) / 4, lowC + 0.5));
+  return {
+    psa, cgc: Math.max(1, Math.min(creaseCap, cgc)), bgs: Math.max(1, Math.min(creaseCap, bgs)),
+    centering: { psa: cPsa, cgc: cCgc, bgs: cBgs },
+  };
+}
+
+/** Innen- und Außenlinie getrennt halten: Abstand unter 1 % oder über 15 % → typischer Rahmen (4 %). */
+export function fixInner(L, typical = { x: 0.04, y: 0.035 }) {
+  const cw = L.outerR - L.outerL, ch = L.outerB - L.outerT;
+  const bad = (gap, size) => gap < size * 0.01 || gap > size * 0.15;
+  if (bad(L.innerL - L.outerL, cw)) L.innerL = L.outerL + cw * typical.x;
+  if (bad(L.outerR - L.innerR, cw)) L.innerR = L.outerR - cw * typical.x;
+  if (bad(L.innerT - L.outerT, ch)) L.innerT = L.outerT + ch * typical.y;
+  if (bad(L.outerB - L.innerB, ch)) L.innerB = L.outerB - ch * typical.y;
+  return L;
+}
+
 // ---------------- UI ----------------
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -371,11 +404,12 @@ export function createGrading({ root, getCard, onApply, toast, getAiKey = () => 
   root.innerHTML = `
     <div class="card" id="g-for"></div>
     <div class="card" id="g-wizard"></div>
+    <div class="card hidden" id="g-report"></div>
     <div class="card">
       <div class="seg" id="g-side"><button data-s="front" class="on">Vorderseite</button><button data-s="back">Rückseite</button></div>
       <div class="grid2" style="margin-top:6px">
         <label class="btn primary">Kamera<input id="g-file" type="file" accept="image/*" capture="environment" hidden /></label>
-        <label class="btn">Aus Galerie<input id="g-gal" type="file" accept="image/*" hidden /></label>
+        <label class="btn">Aus Galerie<input id="g-gal" type="file" accept="image/*" multiple hidden /></label>
       </div>
       <p class="hint">Karte gerade, flach und formatfüllend fotografieren, ohne Hülle und bei gleichmäßigem Licht ohne Spiegelung.</p>
       <div id="g-stage-wrap" class="hidden">
@@ -445,7 +479,10 @@ export function createGrading({ root, getCard, onApply, toast, getAiKey = () => 
     e.target.value = '';
   };
   $('#g-file', root).addEventListener('change', onPick);
-  $('#g-gal', root).addEventListener('change', onPick);
+  $('#g-gal', root).addEventListener('change', (e) => {
+    const fs = [...(e.target.files || [])];
+    if (fs.length >= 2) { loadBoth(fs); e.target.value = ''; } else onPick(e);
+  });
   const defaultCorners = (c) => [[c.width * 0.05, c.height * 0.04], [c.width * 0.95, c.height * 0.04], [c.width * 0.95, c.height * 0.96], [c.width * 0.05, c.height * 0.96]];
 
   function setMode(m) {
@@ -549,7 +586,8 @@ export function createGrading({ root, getCard, onApply, toast, getAiKey = () => 
       const m = cropped ? 0.008 : 0.02; // Mindestabstand Innenrahmen zur Außenkante
       const iL = firstPeak(colG, oL + cw * m, oL + cw * 0.12, true), iR = firstPeak(colG, oR - cw * 0.12, oR - cw * m, false);
       const iT = firstPeak(rowG, oT + ch * m, oT + ch * 0.1, true), iB = firstPeak(rowG, oB - ch * 0.1, oB - ch * m, false);
-      return { outerL: oL / w, outerR: oR / w, outerT: oT / h, outerB: oB / h, innerL: iL / w, innerR: iR / w, innerT: iT / h, innerB: iB / h };
+      const res = { outerL: oL / w, outerR: oR / w, outerT: oT / h, outerB: oB / h, innerL: iL / w, innerR: iR / w, innerT: iT / h, innerB: iB / h };
+      return fixInner(res);
     } catch {
       return null;
     }
@@ -914,7 +952,66 @@ export function createGrading({ root, getCard, onApply, toast, getAiKey = () => 
     });
   }
 
+  function thumb(sd, h = 170) {
+    if (!sd.img) return '';
+    const sc = h / sd.img.height;
+    const c = document.createElement('canvas');
+    c.width = Math.round(sd.img.width * sc);
+    c.height = h;
+    const x = c.getContext('2d');
+    x.drawImage(sd.img, 0, 0, c.width, c.height);
+    const L = sd.lines, w = c.width;
+    for (const [pre, col] of [['outer', '#ffd60a'], ['inner', '#ff3b30']]) {
+      x.strokeStyle = col; x.lineWidth = 1.5;
+      x.strokeRect(L[pre + 'L'] * w, L[pre + 'T'] * h, (L[pre + 'R'] - L[pre + 'L']) * w, (L[pre + 'B'] - L[pre + 'T']) * h);
+    }
+    sd.defects.forEach((d, i) => {
+      x.fillStyle = d.sev >= 3 ? '#ff453a' : d.sev === 2 ? '#ff9f0a' : '#ffd60a';
+      x.beginPath(); x.arc(d.x * w, d.y * h, 7, 0, Math.PI * 2); x.fill();
+      x.fillStyle = '#000'; x.font = '700 9px system-ui'; x.textAlign = 'center'; x.textBaseline = 'middle';
+      x.fillText(String(i + 1), d.x * w, d.y * h);
+    });
+    return c.toDataURL('image/jpeg', 0.8);
+  }
+  function renderReport() {
+    const el = $('#g-report', root);
+    if (!el) return;
+    const f = st.sides.front, b = st.sides.back;
+    if (!f.img && !b.img) { el.classList.add('hidden'); return; }
+    el.classList.remove('hidden');
+    if (st.drag) return; // beim Ziehen nicht neu zeichnen
+    const r = compute();
+    const cf = f.img ? centering(f.lines) : null, cb = b.img ? centering(b.lines) : null;
+    const cs = checklistScores(st.checklist);
+    const gs = gradeSummary({ worstFront: cf ? cf.worst : 50, worstBack: cb ? cb.worst : null, ...r.sub, creaseCap: cs.cap });
+    const bar = (label, v, sub) => `<div class="g-bar"><span>${label}</span><div class="g-bar-track"><div class="g-bar-fill" style="width:${(v / 10) * 100}%"></div></div><b>${fmt(v)}</b>${sub ? `<span class="meta g-bar-sub">${sub}</span>` : ''}</div>`;
+    const cen = (c) => (c ? `${Math.round(c.lr)}/${Math.round(100 - c.lr)} · ${Math.round(c.tb)}/${Math.round(100 - c.tb)}` : '–');
+    const nDef = (sd) => sd.defects.length;
+    el.innerHTML = `
+      <div class="g-rep-top">
+        <div class="g-rep-main"><span>Geschätzte Note</span><b>PSA ${gs.psa}</b><span class="meta">${st.aiConfidence ? 'KI-Sicherheit ' + { low: 'gering', medium: 'mittel', high: 'hoch' }[st.aiConfidence] : 'ohne KI'}</span></div>
+        <div class="g-rep-grades">
+          <div><span>PSA</span><b>${gs.psa}</b></div>
+          <div><span>CGC</span><b>${fmt(gs.cgc)}</b></div>
+          <div><span>BGS</span><b>${fmt(gs.bgs)}</b></div>
+        </div>
+      </div>
+      <div class="g-bars">
+        ${bar('Zentrierung', gs.centering.bgs, `vorne ${cen(cf)}${cb ? ' · hinten ' + cen(cb) : ''}`)}
+        ${bar('Ecken', r.sub.corners, st.checklist.cornerWhitening ? st.checklist.cornerWhitening + ' Ecke(n) mit Weißung' : '')}
+        ${bar('Kanten', r.sub.edges, st.checklist.edgeWhitening !== 'none' ? 'Weißung ' + CHECK_LABELS.edgeWhitening[st.checklist.edgeWhitening] : '')}
+        ${bar('Oberfläche', r.sub.surface, st.checklist.scratches ? (st.checklist.scratchCount || 'einige') + ' Kratzer' : '')}
+      </div>
+      <div class="g-rep-thumbs">
+        ${f.img ? `<figure><img src="${thumb(f)}" alt="Vorderseite"><figcaption>Vorderseite · ${nDef(f)} Mängel</figcaption></figure>` : ''}
+        ${b.img ? `<figure><img src="${thumb(b)}" alt="Rückseite"><figcaption>Rückseite · ${nDef(b)} Mängel</figcaption></figure>` : ''}
+      </div>
+      ${st.aiSummary.front || st.aiSummary.back ? `<p class="meta">${st.aiSummary.front ? '<b>Vorne:</b> ' + esc(st.aiSummary.front) + ' ' : ''}${st.aiSummary.back ? '<b>Hinten:</b> ' + esc(st.aiSummary.back) : ''}</p>` : ''}
+      <p class="date">Zentrierungs-Teilnote nach BGS-Richtwert, PSA-Grenzen offiziell. Schätzung – kein offizielles Grading.</p>`;
+  }
+
   function renderResult() {
+    renderReport();
     const r = compute();
     const sel = (key) => `<select data-ov="${key}"><option value="">Auto (${fmt(r.auto[key])})</option>${[10, 9.5, 9, 8.5, 8, 7, 6, 5, 4, 3, 2, 1].map((g) => `<option value="${g}" ${st.overrides[key] === g ? 'selected' : ''}>${fmt(g)}</option>`).join('')}</select>`;
     $('#g-result', root).innerHTML = `
@@ -1041,12 +1138,24 @@ export function createGrading({ root, getCard, onApply, toast, getAiKey = () => 
         r.defects.filter((d) => d.side === s).map((d) => ({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), x: d.x, y: d.y, cat: d.cat, kind: d.kind, sev: d.sev, note: d.note, ai: true })),
       );
     }
+    // Rahmenbreiten der KI: Innenlinien setzen, wo die Bildanalyse unsicher ist (Abstand < 1,5 % oder > 12 %)
+    for (const s of sides) {
+      const b = r.borders && r.borders[s];
+      if (!b || !(b.left > 0)) continue;
+      const L = st.sides[s].lines;
+      const cw = L.outerR - L.outerL, ch = L.outerB - L.outerT;
+      const odd = (gap, size) => gap < size * 0.015 || gap > size * 0.12;
+      if (odd(L.innerL - L.outerL, cw)) L.innerL = L.outerL + cw * b.left / 100;
+      if (odd(L.outerR - L.innerR, cw)) L.innerR = L.outerR - cw * b.right / 100;
+      if (odd(L.innerT - L.outerT, ch)) L.innerT = L.outerT + ch * b.top / 100;
+      if (odd(L.outerB - L.innerB, ch)) L.innerB = L.outerB - ch * b.bottom / 100;
+    }
     // Checkliste: KI-Gesamtbild übernehmen, eigene Notiz behalten
     st.checklist = { ...st.checklist, ...r.checklist, notes: st.checklist.notes };
     st.aiSummary = { front: r.summaryFront || '', back: r.summaryBack || '' };
     st.aiConfidence = r.confidence;
-    st.mode = 'defect';
-    $$('#g-mode button', root).forEach((x) => x.classList.toggle('on', x.dataset.m === 'defect'));
+    st.mode = 'center';
+    $$('#g-mode button', root).forEach((x) => x.classList.toggle('on', x.dataset.m === 'center'));
   }
 
   // ---------- Geführter Scan (vorne, dann hinten, dann KI) ----------
@@ -1063,7 +1172,7 @@ export function createGrading({ root, getCard, onApply, toast, getAiKey = () => 
         ${step(3, 'KI-Grading', !!(st.aiSummary.front || st.aiSummary.back), f && b)}
       </div>
       ${!f ? `<label class="btn primary block">Vorderseite fotografieren<input type="file" accept="image/*" capture="environment" data-wz="front" hidden /></label>
-              <label class="btn block">Vorderseite aus Galerie<input type="file" accept="image/*" data-wz="front" hidden /></label>`
+              <label class="btn block">Aus Galerie (1 Foto oder vorne + hinten)<input type="file" accept="image/*" multiple data-wz="front" hidden /></label>`
         : !b ? `<label class="btn primary block">Rückseite fotografieren<input type="file" accept="image/*" capture="environment" data-wz="back" hidden /></label>
                 <label class="btn block">Rückseite aus Galerie<input type="file" accept="image/*" data-wz="back" hidden /></label>`
         : `<button class="primary block" id="wz-ai">${st.aiSummary.front || st.aiSummary.back ? 'KI-Grading erneut ausführen' : 'KI-Grading beider Seiten starten'}</button>`}
@@ -1072,35 +1181,55 @@ export function createGrading({ root, getCard, onApply, toast, getAiKey = () => 
     const ai = $('#wz-ai', el);
     if (ai) ai.addEventListener('click', runAi);
   }
-  function wizardPick(e, which) {
-    const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    const im = new Image();
-    im.onload = () => {
-      const s = Math.min(1, 1600 / Math.max(im.naturalWidth, im.naturalHeight));
-      const c = document.createElement('canvas');
-      c.width = Math.round(im.naturalWidth * s);
-      c.height = Math.round(im.naturalHeight * s);
-      c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
-      st.side = which;
-      $$('#g-side button', root).forEach((x) => x.classList.toggle('on', x.dataset.s === which));
-      const sd = side();
-      sd.raw = c;
-      sd.defects = [];
-      sd.corners = detectCorners(c) || defaultCorners(c);
-      // automatisch begradigen
-      sd.img = warpCard(c, sd.corners, Math.min(1200, Math.max(800, Math.round(c.height * 0.8))), 0.04);
-      sd.straight = true;
-      sd.lines = autoDetect(sd.img, { cropped: false }) || defaultLines();
-      filtered = null;
-      $('#g-stage-wrap', root).classList.remove('hidden');
-      setMode('center');
-      renderAll();
-      URL.revokeObjectURL(im.src);
-      if (which === 'back' && st.sides.front.img && getAiKey()) runAi();
-    };
-    im.src = URL.createObjectURL(f);
+  /** Foto laden, automatisch begradigen und vermessen. */
+  function loadSide(file, which) {
+    return new Promise((resolve) => {
+      const im = new Image();
+      im.onload = () => {
+        const s = Math.min(1, 1600 / Math.max(im.naturalWidth, im.naturalHeight));
+        const c = document.createElement('canvas');
+        c.width = Math.round(im.naturalWidth * s);
+        c.height = Math.round(im.naturalHeight * s);
+        c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+        const sd = st.sides[which];
+        sd.raw = c;
+        sd.defects = [];
+        sd.corners = detectCorners(c) || defaultCorners(c);
+        sd.img = warpCard(c, sd.corners, Math.min(1200, Math.max(800, Math.round(c.height * 0.8))), 0.04);
+        sd.straight = true;
+        sd.lines = autoDetect(sd.img, { cropped: false }) || defaultLines();
+        URL.revokeObjectURL(im.src);
+        resolve();
+      };
+      im.onerror = () => { toast && toast('Foto nicht lesbar'); resolve(); };
+      im.src = URL.createObjectURL(file);
+    });
+  }
+  function showSide(which) {
+    st.side = which;
+    $$('#g-side button', root).forEach((x) => x.classList.toggle('on', x.dataset.s === which));
+    filtered = null;
+    $('#g-stage-wrap', root).classList.remove('hidden');
+    setMode('center');
+    renderAll();
+  }
+  /** Zwei Fotos auf einmal: erstes = Vorderseite, zweites = Rückseite. */
+  async function loadBoth(files) {
+    await loadSide(files[0], 'front');
+    await loadSide(files[1], 'back');
+    st.aiSummary = { front: '', back: '' };
+    showSide('front');
+    if (getAiKey()) runAi();
+    else toast && toast('Beide Seiten geladen. Für die KI-Analyse einen Anthropic-Schlüssel unter Optionen eintragen.');
+  }
+  async function wizardPick(e, which) {
+    const fs = [...(e.target.files || [])];
     e.target.value = '';
+    if (!fs.length) return;
+    if (fs.length >= 2) return loadBoth(fs);
+    await loadSide(fs[0], which);
+    showSide(which);
+    if (which === 'back' && st.sides.front.img && getAiKey()) runAi();
   }
 
   // ---------- Checkliste ----------

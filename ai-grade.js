@@ -30,6 +30,10 @@ export const GradeSchema = z.object({
     printLines: z.boolean(),
   }),
   subgrades: z.object({ corners: z.number(), edges: z.number(), surface: z.number() }),
+  borders: z.object({
+    front: z.object({ left: z.number(), right: z.number(), top: z.number(), bottom: z.number() }),
+    back: z.object({ left: z.number(), right: z.number(), top: z.number(), bottom: z.number() }),
+  }),
   summaryFront: z.string(),
   summaryBack: z.string(),
   confidence: z.enum(['low', 'medium', 'high']),
@@ -49,6 +53,8 @@ Weißung an Kanten und Ecken ist auf der (blauen) Rückseite meist besser sichtb
   auch wenn sie vorne und hinten weiß ist). scratchCount = Kratzer insgesamt; scratchWhere: wo (vorne/hinten, Bereich).
   holoDamage = not_holo, wenn die Vorderseite keine Holo-Fläche hat.
 - subgrades: Ecken, Kanten, Oberfläche je 1-10 (halbe Noten erlaubt) für die ganze Karte.
+- borders: Breite des Rahmens (Abstand Kartenkante bis innerer Bild-/Textrahmen) je Seite in Prozent der Kartenbreite
+  (left/right) bzw. Kartenhöhe (top/bottom), z. B. 5.2. Für eine fehlende Seite 0 eintragen. Miss sorgfältig, das dient der Zentrierung.
 - summaryFront / summaryBack: je 1-2 deutsche Sätze; leer lassen, wenn diese Seite fehlt.
 - confidence: wie sicher du bei dieser Fotoqualität bist.`;
 
@@ -95,4 +101,64 @@ export async function aiGrade(body, apiKey) {
   for (const k of ['corners', 'edges', 'surface']) r.subgrades[k] = clamp(r.subgrades[k], 1, 10);
   r.checklist.cornerWhitening = clamp(r.checklist.cornerWhitening, 0, 4);
   return { result: r, model: response.model, usage: response.usage };
+}
+
+// ---------- Kartenerkennung ----------
+export const IdentifySchema = z.object({
+  cards: z.array(
+    z.object({
+      name: z.string(),
+      nameEn: z.string(),
+      number: z.string(),
+      total: z.string(),
+      setName: z.string(),
+      language: z.enum(['de', 'en', 'fr', 'it', 'es', 'pt', 'ja', 'ko', 'zh', 'other']),
+      variant: z.string(),
+      confidence: z.enum(['low', 'medium', 'high']),
+    }),
+  ),
+});
+
+const IDENTIFY_SYSTEM = `Du erkennst Pokémon-Sammelkarten auf Fotos. Auf einem Foto können eine oder mehrere Karten liegen.
+Für jede erkennbare Karte (Vorderseite) gib an:
+- name: Kartenname genau wie aufgedruckt (Sprache der Karte, inkl. Zusätzen wie "ex", "V", "VMAX", "GX", "LV.X").
+- nameEn: englischer Kartenname (z. B. "Glurak-ex" → "Charizard ex").
+- number / total: die Kartennummer unten (z. B. "006" und "165"; bei Promos/Sondernummern wie "TG05"/"TG30" oder "SWSH029" die Buchstaben behalten; total leer, wenn keine Gesamtzahl aufgedruckt ist).
+- setName: Set, wenn erkennbar (Symbol, Kürzel unten links wie "MEW" oder "PAL"), sonst leer.
+- language: Sprache der Karte.
+- variant: z. B. "Reverse Holo", "Holo", "Full Art", "1. Edition", sonst leer.
+- confidence: wie sicher die Erkennung ist.
+Lies Nummern besonders sorgfältig; rate nicht – wenn die Nummer unlesbar ist, lass sie leer. Rückseiten und Nicht-Karten ignorieren.`;
+
+/** @param {{ image: string }} body  JPEG base64 */
+export async function aiIdentify(body, apiKey) {
+  const client = new Anthropic({ apiKey, baseURL: 'https://api.anthropic.com' });
+  const response = await client.beta.messages.create({
+    model: 'claude-opus-5-5',
+    max_tokens: 8000,
+    betas: ['server-side-fallback-2026-07-01'],
+    fallbacks: 'default',
+    system: IDENTIFY_SYSTEM,
+    output_config: { effort: 'low', format: zodOutputFormat(IdentifySchema) },
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: body.image } },
+          { type: 'text', text: 'Welche Karten sind auf dem Foto?' },
+        ],
+      },
+    ],
+  });
+  if (response.stop_reason === 'refusal') return { error: 'refusal' };
+  const text = response.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    return { error: 'invalid_json' };
+  }
+  const parsed = IdentifySchema.safeParse(json);
+  if (!parsed.success) return { error: 'invalid_schema' };
+  return { result: parsed.data };
 }

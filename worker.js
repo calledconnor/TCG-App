@@ -3,7 +3,7 @@
 //   /api/graded        Graded-Preise (Pokemon Price Tracker, Schlüssel per Secret PPT_API_KEY oder Header X-PPT-Key), 24 h gecacht
 //   /api/tcgdex/...    GET-Proxy zu https://api.tcgdex.net/v2/... (Fallback, falls der Browser TCGdex blockt), 24 h gecacht
 // Alles andere: statische Dateien (env.ASSETS).
-import { aiGrade } from './ai-grade.js';
+import { aiGrade, aiIdentify } from './ai-grade.js';
 
 const JSON_HDR = { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'X-PPT-Key, X-Anthropic-Key, Content-Type', 'Access-Control-Expose-Headers': 'X-Credits-Remaining, X-API-Calls-Consumed' };
 
@@ -31,6 +31,21 @@ export default {
     const url = new URL(request.url);
     if (url.pathname.startsWith('/api/')) {
       // KI-Grading (POST, Bild im Body). Schlüssel: Secret ANTHROPIC_API_KEY oder Header X-Anthropic-Key.
+      if (url.pathname === '/api/ai-identify') {
+        if (request.method !== 'POST') return new Response(JSON.stringify({ error: 'POST erwartet' }), { status: 405, headers: JSON_HDR });
+        const key = env.ANTHROPIC_API_KEY || request.headers.get('x-anthropic-key');
+        if (!key) return new Response(JSON.stringify({ error: 'not_configured' }), { status: 501, headers: JSON_HDR });
+        let body;
+        try { body = await request.json(); } catch { return new Response(JSON.stringify({ error: 'bad_body' }), { status: 400, headers: JSON_HDR }); }
+        if (!body || typeof body.image !== 'string' || body.image.length > 6_000_000) return new Response(JSON.stringify({ error: 'bad_image' }), { status: 400, headers: JSON_HDR });
+        try {
+          const out = await aiIdentify(body, key);
+          return new Response(JSON.stringify(out), { status: out.error ? 422 : 200, headers: JSON_HDR });
+        } catch (e) {
+          const status = e && e.status ? e.status : 502;
+          return new Response(JSON.stringify({ error: status === 401 ? 'key_invalid' : status === 429 ? 'rate_limited' : 'api_error', message: String(e && e.message || e) }), { status, headers: JSON_HDR });
+        }
+      }
       if (url.pathname === '/api/ai-grade') {
         if (request.method !== 'POST') return new Response(JSON.stringify({ error: 'POST erwartet' }), { status: 405, headers: JSON_HDR });
         const key = env.ANTHROPIC_API_KEY || request.headers.get('x-anthropic-key');

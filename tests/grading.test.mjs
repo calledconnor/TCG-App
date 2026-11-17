@@ -54,3 +54,16 @@ test('Checkliste: Teilnoten und Knick-Deckel', async () => {
   assert.equal(checklistScores(c).cap, 4);
   assert.ok(checklistLines(c).some((l) => l.startsWith('Kratzer: ja, 2')));
 });
+
+test('gradeSummary und fixInner', async () => {
+  const { gradeSummary, fixInner } = await import('../js/grading.js');
+  const g = gradeSummary({ worstFront: 57, worstBack: 60, corners: 9, edges: 9, surface: 9.5 });
+  assert.equal(g.psa, 9);
+  assert.ok(g.bgs <= 9 && g.bgs >= 8.5);
+  assert.ok(g.cgc >= 8.5 && g.cgc <= 9);
+  const crease = gradeSummary({ worstFront: 50, worstBack: 50, corners: 10, edges: 10, surface: 10, creaseCap: 4 });
+  assert.equal(crease.psa, 4);
+  const L = fixInner({ outerL: 0.04, outerR: 0.96, outerT: 0.04, outerB: 0.96, innerL: 0.041, innerR: 0.9, innerT: 0.08, innerB: 0.959 });
+  assert.ok(L.innerL - L.outerL > 0.03); // zu nah -> typischer Rahmen
+  assert.equal(L.innerT, 0.08); // plausibel -> bleibt
+});

@@ -29,6 +29,10 @@
           <span>Sprache</span>
           <select id="search-lang"></select>
         </label>
+        <div class="grid2 top-actions">
+          <button id="open-calc" class="small">Rechner</button>
+          <button id="open-cart" class="small">Ankaufskorb</button>
+        </div>
         <div class="seg" role="tablist" id="search-mode">
           <button data-mode="name" class="on" role="tab">Name</button>
           <button data-mode="number" role="tab">Nummer</button>
@@ -53,6 +57,15 @@
         </form>
 
         <div class="mode-pane hidden" data-pane="camera">
+          <div class="ai-scan">
+            <div class="grid2">
+              <label class="btn primary">KI-Scan: Foto<input id="ai-cam" type="file" accept="image/*" capture="environment" hidden /></label>
+              <label class="btn primary">KI-Scan: Galerie<input id="ai-gal" type="file" accept="image/*" multiple hidden /></label>
+            </div>
+            <p class="hint">Claude erkennt Name, Set und Nummer, auch mehrere Karten auf einem Foto und mehrere Fotos auf einmal. Alles landet in der Scan-Liste, die gespeichert bleibt.</p>
+            <p class="status" id="ai-scan-status" aria-live="polite"></p>
+          </div>
+          <h3>Ohne KI</h3>
           <button id="scan-start" class="primary block">Live-Scanner starten</button>
           <div id="scan-live" class="hidden">
             <div class="scan-wrap" id="scan-wrap">
@@ -85,6 +98,7 @@
       </div>
 
       <div id="search-status" class="status" aria-live="polite"></div>
+      <div id="scan-list"></div>
       <div id="results" class="results"></div>
     </section>
 
@@ -99,6 +113,12 @@
     <section id="view-cart" class="view" aria-label="Ankaufskorb">
       <h2 class="page-title">Ankaufskorb</h2>
       <div id="cart"></div>
+    </section>
+
+    <!-- RECHNER -->
+    <section id="view-calc" class="view" aria-label="Rechner">
+      <h2 class="page-title">Rechner</h2>
+      <div id="calc"></div>
     </section>
 
     <!-- GRADING -->

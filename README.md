@@ -87,9 +87,25 @@ Reiter „Sammlung“ (früher Bestand):
 - **Verkäufe:** Knopf „Verkauft“ (Preis vorbelegt mit Angebotspreis) oder Felder Verkaufspreis, Datum, Plattform, tatsächlicher Versand. Ergebnis: Netto-Erlös, Deckungsbeitrag, Rendite, Haltedauer.
 - CSV-Export mit allen Kalkulations- und Verkaufsspalten.
 
+## KI-Kartenerkennung und Scan-Liste
+
+Suchen → Kamera → „KI-Scan: Foto“ oder „KI-Scan: Galerie“ (mehrere Fotos, mehrere Karten pro Foto). Worker `/api/ai-identify` (Claude, strukturierte Ausgabe: Name, englischer Name, Nummer, Gesamtzahl, Set, Sprache, Variante, Sicherheit). Zuordnung: Nummer + Gesamtzahl bei TCGdex, Abgleich mit dem Namen, sonst Name + Nummer, sonst Name; Alternativen als Auswahl. Scan-Liste bleibt gespeichert, Einträge per Wischen oder Mülleimer entfernen (mit Rückgängig), „Alle in den Korb“.
+
+## Preis-Plausibilität
+
+Liegen Cardmarket Ø 1 Tag / Ø 7 / Ø 30 / Trend einer Variante mehr als Faktor 3 auseinander (Ausreißer im Preisindex, z. B. Gengar Skyridge 10/144: 590 € bis 6.725 €), warnt die App und rechnet vorsichtig mit dem niedrigsten Wert. Varianten-Umschalter Standard / Reverse Holo direkt bei den Marktpreisen. Links: Cardmarket mit Name + Set-Kürzel + Nummer (z. B. „Gengar SK 10“), Cardmarket alle Treffer, PriceCharting, eBay verkauft.
+
+## Rechner
+
+Einzelkarte (Einkauf vs. Verkaufswert) und Sammelankauf (Werte je Karte oder aus dem Korb, Gesamtpreis des Verkäufers) mit Ampel: ab 25 % Rendite „lohnt sich“, ab 10 % „knapp“, darunter „lohnt sich nicht“, plus Höchstpreis für 25 % Rendite. Dieselbe Ampel steht in der Bewertung („Verkäufer will“) und im Korb.
+
 ## Ankaufskorb
 
-In der Bewertung „In den Ankaufskorb“ (Angebot vorbelegt mit dem 80-%-Höchstgebot, auf 0,50 € abgerundet). Kopfleiste zeigt „Korb n · Summe“. Übersicht: je Karte Wert, Höchstgebot, eigenes Angebot (änderbar); Summen (Verkaufswert, nach Kosten, Höchstgebote, Einzelangebote), Mengenrabatt (Vorschlag: ab 5 Karten 5 %, ab 10 Karten 10 %, ab 20 Karten 15 %, frei wählbar), Gesamtangebot, erwarteter Gewinn und Rendite, Pott vorher/nachher. „Angebot teilen“ erzeugt eine Liste für den Verkäufer, „Alle gekauft“ übernimmt alles mit anteilig rabattiertem Einkaufspreis in die Sammlung.
+In der Bewertung „In den Ankaufskorb“ (Angebot vorbelegt mit dem 80-%-Höchstgebot, auf 0,50 € abgerundet). Kopfleiste zeigt „Korb n · Summe“. Übersicht: je Karte Wert, Höchstgebot, eigenes Angebot (änderbar); Summen (Verkaufswert, nach Kosten, Höchstgebote, Einzelangebote), Mengenrabatt (Vorschlag: ab 5 Karten 5 %, ab 10 Karten 10 %, ab 20 Karten 15 %, frei wählbar), Gesamtangebot, erwarteter Gewinn und Rendite, Pott vorher/nachher. „Angebot teilen“ erzeugt eine Liste für den Verkäufer, „Alle gekauft“ übernimmt alles mit anteilig rabattiertem Einkaufspreis in die Sammlung; die Karten bleiben im Korb als „gekauft“ markiert, bis man sie entfernt. Korb bleibt gespeichert.
+
+## Sammlung: Portfolio, Einkauf/Verkauf
+
+Kopf der Sammlung ist der Portfolio-Wert (Marktwert aller Karten im Bestand) mit Plus/Minus gegenüber dem Einkauf; die Kasse erscheint nur mit Startkapital. Je Karte: Einkauf über (Laden, eBay, Cardmarket, Privat, Messe), Art (Sofort-Kaufen, Auktion, Preisvorschlag, Festpreis, Tausch), Verkäufer, Bewertung (positiv/neutral/negativ, abgegeben ja/nein); beim Verkauf ebenso Art, Käufer, Bewertung. Löschen per Wischen nach links oder Mülleimer, jeweils mit Rückgängig.
 
 ## Bestand
 
