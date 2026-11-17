@@ -240,11 +240,15 @@ export function extractPricing(card) {
     for (const k of keys) {
       const fields = {};
       for (const f of TP_FIELDS) fields[f] = num(tp[k][f]);
-      variants.push({ key: k, fields });
+      variants.push({ key: k, fields, productId: tp[k].productId || null });
     }
     tcgplayer = { updated: tp.updated || null, unit: tp.unit || 'USD', variants };
   }
-  return { cardmarket, tcgplayer };
+  // TCGplayer-Produkt-IDs (für Graded-Preise): aus pricing und variants_detailed
+  const tcgIds = new Set();
+  for (const v of tcgplayer?.variants || []) if (v.productId) tcgIds.add(String(v.productId));
+  for (const v of card?.variants_detailed || []) if (v?.thirdParty?.tcgplayer) tcgIds.add(String(v.thirdParty.tcgplayer));
+  return { cardmarket, tcgplayer, tcgIds: [...tcgIds] };
 }
 
 /** Englischer Name derselben Karte (gleiche ID über alle Sprachen) – für Cardmarket-/eBay-Suche. */
@@ -286,4 +290,70 @@ export async function usdEur({ force = false } = {}) {
     } catch {}
   }
   return cached ? { ...cached.data, stale: true } : null;
+}
+
+/**
+ * Graded-Preise über den eigenen Worker (/api/graded) → Pokemon Price Tracker.
+ * Bevorzugt exakte TCGplayer-ID, sonst Suche (Name + Nummer). 24 h im Gerät gecacht.
+ * Rückgabe: { status: 'ok'|'not_configured'|'key_invalid'|'not_found'|'error', data?, fetchedAt? }
+ */
+export async function gradedPrices({ tcgIds = [], query = '', apiKey = '', force = false, cacheOnly = false }) {
+  const params = tcgIds.length ? `tcgPlayerId=${encodeURIComponent(tcgIds[0])}` : `q=${encodeURIComponent(query)}`;
+  const key = 'graded:' + params;
+  let cached;
+  try { cached = await db.get('cache', key); } catch {}
+  if (!force && cached && Date.now() - cached.fetchedAt < DAY) return { status: 'ok', data: cached.data, fetchedAt: cached.fetchedAt, fromCache: true };
+  if (cacheOnly) return { status: 'none' };
+  if (location.protocol !== 'https:' && !location.hostname.match(/^(localhost|127\.)/)) return { status: 'error', message: 'nur über die Online-Version verfügbar' };
+  try {
+    const res = await fetch('/api/graded?' + params, { headers: apiKey ? { 'X-PPT-Key': apiKey } : {} });
+    const ct = res.headers.get('content-type') || '';
+    if (!ct.includes('json')) return { status: 'error', message: 'Endpunkt nicht erreichbar (nur in der Cloudflare-Version)' };
+    const body = await res.json();
+    if (res.status === 501) return { status: 'not_configured' };
+    if (res.status === 401) return { status: 'key_invalid' };
+    if (res.status === 429) return { status: 'error', message: 'Tageslimit der API erreicht (Free: 100 Credits/Tag)' };
+    if (!res.ok) return { status: 'error', message: body.error || 'HTTP ' + res.status };
+    const card = Array.isArray(body.data) ? body.data[0] : body.data;
+    if (!card) return { status: 'not_found' };
+    const data = normalizeGraded(card);
+    db.put('cache', { url: key, data, status: 200, fetchedAt: Date.now() }).catch(() => {});
+    return { status: 'ok', data, fetchedAt: Date.now() };
+  } catch (e) {
+    if (cached) return { status: 'ok', data: cached.data, fetchedAt: cached.fetchedAt, fromCache: true, stale: true };
+    return { status: 'error', message: e.message };
+  }
+}
+
+/** salesByGrade-Schlüssel "psa10", "cgc9_5", "bgs10" → Firma + Note. */
+export function parseGradeKey(k) {
+  const m = String(k).toLowerCase().match(/^([a-z]+?)(\d+(?:_5)?)$/);
+  if (!m) return null;
+  return { company: m[1].toUpperCase(), grade: m[2].replace('_', '.'), sort: parseFloat(m[2].replace('_', '.')) };
+}
+
+export function normalizeGraded(card) {
+  const eb = card.ebay || {};
+  const grades = [];
+  for (const [k, v] of Object.entries(eb.salesByGrade || {})) {
+    const g = parseGradeKey(k);
+    if (!g || !v) continue;
+    const smart = v.smartMarketPrice && typeof v.smartMarketPrice === 'object' ? v.smartMarketPrice : null;
+    grades.push({
+      key: k, company: g.company, grade: g.grade, sort: g.sort,
+      count: v.count ?? null,
+      avg: num(v.averagePrice), median: num(v.medianPrice), min: num(v.minPrice), max: num(v.maxPrice),
+      market7: num(v.marketPrice7Day), trend: v.marketTrend ?? null,
+      smart: smart ? num(smart.price) : null, confidence: smart ? smart.confidence ?? null : null,
+    });
+  }
+  const order = { PSA: 0, CGC: 1, BGS: 2, SGC: 3 };
+  grades.sort((a, b) => (order[a.company] ?? 9) - (order[b.company] ?? 9) || b.sort - a.sort);
+  return {
+    tcgPlayerId: card.tcgPlayerId ?? null,
+    name: card.name ?? '', setName: card.setName ?? '', cardNumber: card.cardNumber ?? '',
+    rawMarketUsd: num(card.prices?.market), rawUpdated: card.prices?.lastUpdated ?? null,
+    grades, totalSales: eb.totalSales ?? null, from: eb.dateRangeStart ?? null, to: eb.dateRangeEnd ?? null,
+    url: card.tcgPlayerUrl ?? null,
+  };
 }

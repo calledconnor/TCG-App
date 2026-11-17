@@ -279,3 +279,11 @@ code { font-size: 12px; background: var(--sunken); padding: 1px 6px; border-radi
 .g-doc { margin-top: 12px; padding-top: 4px; }
 .g-list { margin: 10px 0 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
 .g-list li { margin: 3px 0; }
+
+.facts { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 6px 0 0; font-size: 13px; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; }
+.more { margin-top: 8px; }
+.more summary { cursor: pointer; color: var(--muted); font-size: 13px; min-height: 32px; display: flex; align-items: center; }
+.status a, .hint a { color: inherit; }
+.range { font-size: 11px; color: var(--muted); font-weight: 400; white-space: nowrap; }

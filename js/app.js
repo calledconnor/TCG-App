@@ -1,10 +1,10 @@
 import {
-  DEFAULT_SETTINGS, CONDITION_LABELS, LANG_LABELS, LADDER,
+  DEFAULT_SETTINGS, CONDITION_LABELS, CONDITION_DE, LANG_LABELS, LADDER,
   stats, evaluate, marktwert, parsePrices, parseCardNumber, parseCardNumberLoose, preiseJeZustand,
 } from './calc.js';
 import {
   ALL_LANGS, setApiBase, probeLanguages, searchByName, searchByNumber,
-  getCard, extractPricing, englishName, setIdOf, getSets, usdEur, searchSmart,
+  getCard, extractPricing, englishName, setIdOf, getSets, usdEur, searchSmart, gradedPrices,
 } from './api.js';
 import { db, kvGet, kvSet } from './db.js';
 import { createGrading, shareReport } from './grading.js';
@@ -42,6 +42,25 @@ function toast(msg) {
   clearTimeout(toast._t);
   toast._t = setTimeout(() => t.classList.remove('show'), 2600);
 }
+
+// ---------- Verständliche Bezeichnungen ----------
+const CM_LABEL = { trend: 'Trendpreis', avg: 'Ø Verkaufspreis', low: 'Günstigstes Angebot', avg1: 'Ø letzter Tag', avg7: 'Ø 7 Tage', avg30: 'Ø 30 Tage' };
+const cmLabel = (f) => {
+  const holo = f.endsWith('-holo');
+  const base = holo ? f.slice(0, -5) : f;
+  return `Cardmarket ${CM_LABEL[base] || base}${holo ? ' (Reverse Holo)' : ''}`;
+};
+const TP_VARIANT = {
+  normal: 'Normal', reverse: 'Reverse Holo', reverseHolofoil: 'Reverse Holo', holofoil: 'Holo',
+  '1stEdition': '1. Edition', '1stEditionNormal': '1. Edition', '1stEditionHolofoil': '1. Edition Holo',
+  unlimited: 'Unlimited', unlimitedHolofoil: 'Unlimited Holo',
+};
+const tpVariant = (k) => TP_VARIANT[k] || String(k).replace(/([a-z])([A-Z0-9])/g, '$1 $2').replace(/^./, (x) => x.toUpperCase());
+const LANG_NAME = {
+  de: 'Deutsch', en: 'Englisch', fr: 'Französisch', it: 'Italienisch', es: 'Spanisch', 'pt-br': 'Portugiesisch (BR)', pt: 'Portugiesisch',
+  ja: 'Japanisch', ko: 'Koreanisch', 'zh-tw': 'Chinesisch (traditionell)', 'zh-cn': 'Chinesisch (vereinfacht)', id: 'Indonesisch', th: 'Thailändisch',
+};
+const condText = (k) => `${k} · ${CONDITION_LABELS[k] || k}${CONDITION_DE[k] ? ' (' + CONDITION_DE[k] + ')' : ''}`;
 
 // ---------- Zustand ----------
 let settings = structuredClone(DEFAULT_SETTINGS);
@@ -81,6 +100,7 @@ function show(view, { push = true, keepScroll = true } = {}) {
   if (view === 'inv') renderInventory();
   if (view === 'settings') renderSettings();
   if (view === 'grade') grading && grading.refresh();
+  if (view === 'eval' && cur && $('#graded-api')) renderGradedApi();
   const changed = view !== curView;
   curView = view;
   if (changed) scroller.scrollTop = keepScroll ? scrollMem[view] || 0 : 0;
@@ -489,10 +509,10 @@ const REF_OPTIONS = [
   ['median', 'Median der Angebote'],
   ['mean', 'Durchschnitt der Angebote'],
   ['min', 'Minimum der Angebote'],
-  ['trend', 'cardmarket.trend'],
-  ['avg7', 'cardmarket.avg7'],
-  ['avg30', 'cardmarket.avg30'],
-  ['tcgp', 'TCGplayer market (in EUR)'],
+  ['trend', 'Cardmarket Trendpreis'],
+  ['avg7', 'Cardmarket Ø 7 Tage'],
+  ['avg30', 'Cardmarket Ø 30 Tage'],
+  ['tcgp', 'TCGplayer Marktpreis (in €)'],
   ['custom', 'Eigener Wert'],
 ];
 
@@ -500,7 +520,7 @@ function renderEval() {
   const c = cur.card;
   const cm = cur.pricing.cardmarket;
   const tp = cur.pricing.tcgplayer;
-  const condOpts = (sel) => Object.keys(settings.cf).map((k) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${k} – ${CONDITION_LABELS[k] || k}</option>`).join('');
+  const condOpts = (sel) => Object.keys(settings.cf).map((k) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${condText(k)}</option>`).join('');
   const langOpts = (sel) => Object.keys(settings.lf).map((k) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${LANG_LABELS[k] || k}</option>`).join('');
 
   $('#eval').innerHTML = `
@@ -510,10 +530,13 @@ function renderEval() {
         ${img(c.image, 'high', c.name)}
         <div>
           <p class="title">${esc(c.name)}</p>
-          <div class="meta">${esc(c.set?.name || '')} · Nr. ${esc(c.localId)}${c.set?.cardCount?.official ? '/' + c.set.cardCount.official : ''}</div>
-          <div class="meta">${esc(c.rarity || '')}</div>
-          <div class="meta">TCGdex-ID: ${esc(c.id)} · Sprache: ${esc(cur.lang)}</div>
-          <p class="date">Abgerufen: ${dt(cur.fetchedAt)}${cur.fromCache ? ' <span class="tag">aus Cache' + (cur.stale ? ', offline' : '') + '</span>' : ''}</p>
+          <dl class="facts">
+            <dt>Set</dt><dd>${esc(c.set?.name || '–')}</dd>
+            <dt>Nummer</dt><dd>${esc(c.localId)}${c.set?.cardCount?.official ? ' von ' + c.set.cardCount.official : ''}</dd>
+            ${c.rarity ? `<dt>Seltenheit</dt><dd>${esc(c.rarity)}</dd>` : ''}
+            <dt>Kartentext</dt><dd>${esc(LANG_NAME[cur.lang] || cur.lang)}</dd>
+          </dl>
+          <p class="date">Preise abgerufen am ${dt(cur.fetchedAt)}${cur.fromCache ? ' <span class="tag">' + (cur.stale ? 'offline gespeichert' : 'zwischengespeichert') + '</span>' : ''}</p>
           <button class="small" id="reload-card">Preise neu laden</button>
         </div>
       </div>
@@ -556,17 +579,17 @@ function renderEval() {
     <div class="card">
       <h2>Bewertung</h2>
       <div id="calc-out" class="calc"></div>
-      <h3>Referenzpreis</h3>
-      <label class="row"><span>Referenz</span>
+      <h3>Ausgangspreis</h3>
+      <label class="row"><span>Quelle</span>
         <select id="ref-type">${REF_OPTIONS.map(([v, l]) => `<option value="${v}" ${v === cur.refType ? 'selected' : ''}>${l}</option>`).join('')}</select>
       </label>
       <label class="row" id="row-holo"><span>Variante</span>
-        <select id="ref-holo"><option value="0">normal (trend/avg7/avg30)</option><option value="1">holo ("trend-holo" …)</option></select>
+        <select id="ref-holo"><option value="0">Standard</option><option value="1">Reverse Holo</option></select>
       </label>
       <label class="row" id="row-custom"><span>Eigener Wert</span><input id="ref-custom" inputmode="decimal" placeholder="€" value="${esc(cur.custom)}" /></label>
       <div class="grid2">
-        <label>Zustand der Referenz<select id="ref-cond">${condOpts(cur.refCond)}</select></label>
-        <label>Sprache Referenz<select id="ref-lang">${langOpts(cur.refLang)}</select></label>
+        <label>Ausgangspreis gilt für Zustand<select id="ref-cond">${condOpts(cur.refCond)}</select></label>
+        <label>… und Sprache<select id="ref-lang">${langOpts(cur.refLang)}</select></label>
       </div>
       <h3>Meine Karte</h3>
       <div class="grid2">
@@ -575,14 +598,16 @@ function renderEval() {
       </div>
       ${cur.myLangUnmapped ? `<p class="hint">Für „${esc(cur.lang)}“ gibt es keinen Sprachfaktor – bitte die Sprache von Hand wählen oder in den Einstellungen ergänzen.</p>` : ''}
       <label class="row"><span>Verkauf über</span>
-        <select id="platform">${Object.entries(settings.platforms).map(([k, p]) => `<option value="${k}" ${k === cur.platform ? 'selected' : ''}>${esc(p.label)} (${n2(p.provision * 100)} % · Versand ${eur(p.versand)})</option>`).join('')}</select>
+        <select id="platform">${Object.entries(settings.platforms).map(([k, p]) => `<option value="${k}" ${k === cur.platform ? 'selected' : ''}>${esc(p.label)} (${fmt1(p.provision * 100)} % Gebühr · Versand ${eur(p.versand)})</option>`).join('')}</select>
       </label>
     </div>
 
     <div class="card">
       <h2>Grading &amp; Graded-Preise</h2>
       <div id="grading-sum"></div>
-      <h3>Verkaufspreise gegradeter Karten</h3>
+      <h3>Marktpreise gegradeter Karten</h3>
+      <div id="graded-api"></div>
+      <h3>Eigene Beobachtungen</h3>
       <div class="grid2">
         <select id="gp-grade">${GRADES.map((g) => `<option ${g === cur.gpGrade ? 'selected' : ''}>${g}</option>`).join('')}</select>
         <div class="inline"><input id="gp-one" inputmode="decimal" placeholder="Preis €" /><button id="gp-add" class="primary">+</button></div>
@@ -673,6 +698,7 @@ function renderEval() {
   renderOffers();
   renderGradingSum();
   renderGraded();
+  loadGradedApi(false);
   $('#gp-grade').addEventListener('change', (e) => {
     cur.gpGrade = e.target.value;
     cur.gpTouched = true;
@@ -685,6 +711,74 @@ function renderEval() {
     $('#gp-one').value = '';
     renderGraded();
   });
+}
+
+/** Graded-Preise: aus Cache sofort, per Knopf frisch (kostet API-Credits). */
+async function loadGradedApi(fetchNow) {
+  const el = $('#graded-api');
+  if (!el || !cur) return;
+  const cardId = cur.card.id;
+  const query = `${cur.enName?.name || cur.card.name} ${cur.card.localId}${cur.card.set?.cardCount?.official ? '/' + cur.card.set.cardCount.official : ''}`;
+  if (!fetchNow) {
+    // nur Cache prüfen, keine Credits
+    const r = await gradedPrices({ tcgIds: cur.pricing.tcgIds, query, apiKey: '', force: false, cacheOnly: true });
+    if (cur.card.id !== cardId) return;
+    cur.gradedApi = r.status === 'ok' ? r : null;
+    return renderGradedApi();
+  }
+  el.innerHTML = '<p class="status">Lade Graded-Preise …</p>';
+  const r = await gradedPrices({ tcgIds: cur.pricing.tcgIds, query, apiKey: settings.pptKey, force: true });
+  if (cur.card.id !== cardId) return;
+  cur.gradedApi = r;
+  renderGradedApi();
+}
+
+function renderGradedApi() {
+  const el = $('#graded-api');
+  if (!el) return;
+  const r = cur.gradedApi;
+  const btn = `<button class="block" id="graded-load">${r && r.status === 'ok' ? 'Neu laden' : 'Graded-Preise laden'} <span class="meta">(2 von 100 Gratis-Abrufen pro Tag)</span></button>`;
+  if (!settings.pptKey && !(r && r.status === 'ok')) {
+    el.innerHTML = `<p class="hint">Für PSA-, CGC- und BGS-Preise einmalig einen kostenlosen Schlüssel von Pokemon Price Tracker unter Optionen eintragen.</p><button class="block" id="graded-settings">Zu den Optionen</button>`;
+    $('#graded-settings').addEventListener('click', () => show('settings'));
+    return;
+  }
+  if (!r) { el.innerHTML = btn; return bindGradedBtn(); }
+  const msg = {
+    not_configured: 'Kein API-Schlüssel hinterlegt. Bitte unter Optionen eintragen.',
+    key_invalid: 'Der API-Schlüssel wurde abgelehnt. Bitte unter Optionen prüfen.',
+    not_found: 'Pokemon Price Tracker kennt diese Karte nicht.',
+  }[r.status];
+  if (r.status !== 'ok') {
+    el.innerHTML = `<p class="err">${esc(msg || 'Abruf fehlgeschlagen: ' + (r.message || ''))}</p>` + btn;
+    return bindGradedBtn();
+  }
+  const d = r.data;
+  const toE = (usd) => (usd == null ? null : fx ? usd * fx.rate : null);
+  const money = (usd) => (usd == null ? '–' : fx ? eur(usd * fx.rate) : usd.toLocaleString('de-DE', { style: 'currency', currency: 'USD' }));
+  const raw = d.rawMarketUsd;
+  const est = cur.grading ? cur.grading.overall : null;
+  const row = (g) => {
+    const price = g.smart ?? g.median ?? g.avg;
+    const mult = raw && price ? price / raw : null;
+    const hl = g.company === 'PSA' && est != null && +g.grade === est;
+    return `<tr class="${hl ? 'hl' : ''}"><td>${g.company} ${esc(g.grade)}</td><td>${money(price)}${g.min != null && g.max != null ? `<div class="range">${money(g.min)} – ${money(g.max)}</div>` : ''}</td><td>${g.count ?? '–'}</td><td>${mult ? '× ' + mult.toLocaleString('de-DE', { maximumFractionDigits: 1 }) : '–'}</td></tr>`;
+  };
+  const psa = d.grades.filter((g) => g.company === 'PSA');
+  const other = d.grades.filter((g) => g.company !== 'PSA');
+  const head = '<tr><th>Note</th><th>Marktpreis</th><th>Verkäufe</th><th>Faktor</th></tr>';
+  el.innerHTML = d.grades.length
+    ? `<table class="ladder">${head}${psa.map(row).join('')}</table>
+       ${other.length ? `<details class="more"><summary>Weitere Grader (CGC, BGS, SGC)</summary><table class="ladder">${head}${other.map(row).join('')}</table></details>` : ''}
+       <p class="date">Ungegradet: <b>${money(raw)}</b> (TCGplayer). Faktor = gegradeter Preis ÷ ungegradeter Preis.${est != null ? ' Deine Schätzung PSA ' + est + ' ist markiert.' : ''}</p>
+       <p class="date">Verkäufe auf eBay und Fanatics Collect${d.from && d.to ? ` vom ${new Date(d.from).toLocaleDateString('de-DE')} bis ${new Date(d.to).toLocaleDateString('de-DE')}` : ''}, über Pokemon Price Tracker. Abgerufen am ${dt(r.fetchedAt)}.</p>
+       ${btn}`
+    : `<p class="hint">Für diese Karte wurden keine Verkäufe gegradeter Exemplare gefunden.</p>${btn}`;
+  bindGradedBtn();
+}
+function bindGradedBtn() {
+  const b = $('#graded-load');
+  if (b) b.addEventListener('click', () => loadGradedApi(true));
 }
 
 const GRADES = ['PSA 10', 'PSA 9', 'PSA 8', 'PSA 7', 'BGS 9.5', 'BGS 9', 'CGC 10', 'CGC 9.5', 'CGC 9'];
@@ -741,24 +835,24 @@ function renderMarket() {
   const adj = (v) => (v == null ? null : v * k);
   const tabs = `<div class="seg cond-seg">${Object.keys(settings.cf).map((z) => `<button data-z="${z}" class="${z === cur.myCond ? 'on' : ''}">${z}</button>`).join('')}</div>`;
   const note = cur.myCond === cur.refCond
-    ? `<p class="date">Zustand ${cur.refCond} – ${CONDITION_LABELS[cur.refCond]} (Basis der Marktdaten)</p>`
-    : `<p class="date">Umgerechnet auf ${cur.myCond} – ${CONDITION_LABELS[cur.myCond]}: Basis ${cur.refCond} × ${k.toLocaleString('de-DE', { maximumFractionDigits: 3 })} (Zustandsfaktoren)</p>`;
+    ? `<p class="date">Preise für ${condText(cur.refCond)}, so wie der Markt sie meldet.</p>`
+    : `<p class="date">Umgerechnet auf ${condText(cur.myCond)}: Marktpreis × ${k.toLocaleString('de-DE', { maximumFractionDigits: 2 })} (dein Zustandsfaktor).</p>`;
   const cmRow = (label, f) => `<tr><td>${label}</td><td>${eur(adj(cm[f]))}</td><td>${eur(adj(cm[f + '-holo']))}</td></tr>`;
   const cmHtml = cm
     ? `<table>
-        <tr><th>Cardmarket</th><th>normal</th><th>holo</th></tr>
-        ${cmRow('trend', 'trend')}${cmRow('avg', 'avg')}${cmRow('low', 'low')}
-        ${cmRow('avg1', 'avg1')}${cmRow('avg7', 'avg7')}${cmRow('avg30', 'avg30')}
+        <tr><th>Cardmarket</th><th>Standard</th><th>Reverse Holo</th></tr>
+        ${cmRow(CM_LABEL.trend, 'trend')}${cmRow(CM_LABEL.avg30, 'avg30')}${cmRow(CM_LABEL.avg7, 'avg7')}
+        ${cmRow(CM_LABEL.avg1, 'avg1')}${cmRow(CM_LABEL.avg, 'avg')}${cmRow(CM_LABEL.low, 'low')}
       </table>
       <p class="date">Preisstand Cardmarket: <b>${dt(cm.updated)}</b></p>`
-    : '<p class="hint">TCGdex hat für diese Karte keine Cardmarket-Daten. Preise über die Links unten prüfen und als Angebote eintragen.</p>';
+    : '<p class="hint">Für diese Karte liegen keine Cardmarket-Preise vor. Unten über den Cardmarket-Link prüfen und Angebote eintragen.</p>';
   const money = (usdVal) => (usdVal == null ? '–' : fx ? eur(usdVal * fx.rate * k) : (usdVal * k).toLocaleString('de-DE', { style: 'currency', currency: 'USD' }));
   const tpHtml = tp && tp.variants.length
     ? `<table>
-        <tr><th>TCGplayer${fx ? '' : ' (USD)'}</th><th>low</th><th>mid</th><th>market</th><th>high</th></tr>
-        ${tp.variants.map((v) => `<tr><td>${esc(v.key)}</td><td>${money(v.fields.lowPrice)}</td><td>${money(v.fields.midPrice)}</td><td>${money(v.fields.marketPrice)}</td><td>${money(v.fields.highPrice)}</td></tr>`).join('')}
+        <tr><th>TCGplayer (USA)${fx ? '' : ' in USD'}</th><th>Niedrigster</th><th>Mittel</th><th>Marktpreis</th><th>Höchster</th></tr>
+        ${tp.variants.map((v) => `<tr><td>${esc(tpVariant(v.key))}</td><td>${money(v.fields.lowPrice)}</td><td>${money(v.fields.midPrice)}</td><td>${money(v.fields.marketPrice)}</td><td>${money(v.fields.highPrice)}</td></tr>`).join('')}
       </table>
-      <p class="date">Preisstand TCGplayer: <b>${dt(tp.updated)}</b> · ${fx ? `umgerechnet zum ${fx.manual ? 'manuellen Kurs' : (fx.source || 'EZB') + '-Kurs vom ' + new Date(fx.date).toLocaleDateString('de-DE')} (1 USD = ${fx.rate.toLocaleString('de-DE', { maximumFractionDigits: 4 })} EUR)` : 'Wechselkurs gerade nicht abrufbar, Werte in USD. Kurs lässt sich in den Einstellungen eintragen'} · US-Markt</p>`
+      <p class="date">Preisstand TCGplayer: <b>${dt(tp.updated)}</b> · ${fx ? `in Euro umgerechnet (1 US-Dollar = ${fx.rate.toLocaleString('de-DE', { maximumFractionDigits: 4 })} €, ${fx.manual ? 'eigener Kurs' : 'Kurs vom ' + new Date(fx.date).toLocaleDateString('de-DE')})` : 'Wechselkurs gerade nicht abrufbar, deshalb in US-Dollar. Eigenen Kurs unter Optionen eintragen.'}</p>`
     : '';
   el.innerHTML = tabs + note + cmHtml + tpHtml;
   $$('.cond-seg button', el).forEach((b) =>
@@ -835,25 +929,25 @@ function resolveRef() {
     const s = stats(activeOffers().map((o) => o.v));
     if (!s.count) return { error: 'Keine angehakten Angebote – Preise eintragen oder andere Referenz wählen.' };
     const lbl = { median: 'Median', mean: 'Durchschnitt', min: 'Minimum' }[t];
-    return { value: s[t], label: `${lbl} aus ${s.count} Angebot(en)`, date: Date.now(), dateLabel: 'eingetragen' };
+    return { value: s[t], label: `${lbl} deiner ${s.count} Angebote`, date: Date.now(), dateLabel: 'Eingetragen am' };
   }
   if (t === 'custom') {
     const v = parseNum(cur.custom);
     if (v == null || v <= 0) return { error: 'Eigenen Referenzwert eingeben.' };
-    return { value: v, label: 'Eigener Wert', date: Date.now(), dateLabel: 'eingegeben' };
+    return { value: v, label: 'Eigener Wert', date: Date.now(), dateLabel: 'Eingegeben am' };
   }
   if (t === 'tcgp') {
     const m = tpMarket(cur.pricing);
     if (!m) return { error: 'Keine TCGplayer-Daten für diese Karte.' };
     if (!fx) return { error: 'Wechselkurs nicht verfügbar. Kurs in den Einstellungen eintragen.' };
-    return { value: m.usd * fx.rate, label: `TCGplayer ${m.variant} market (${m.usd.toLocaleString('de-DE', { style: 'currency', currency: 'USD' })})`, date: m.updated, dateLabel: 'Preisstand', isApi: true, field: 'tcgp' };
+    return { value: m.usd * fx.rate, label: `TCGplayer Marktpreis ${tpVariant(m.variant)} (${m.usd.toLocaleString('de-DE', { style: 'currency', currency: 'USD' })})`, date: m.updated, dateLabel: 'Preisstand', isApi: true, field: 'tcgp' };
   }
   const cm = cur.pricing.cardmarket;
   const field = cur.useHolo ? `${t}-holo` : t;
   if (!cm) return { error: 'Keine Cardmarket-Daten für diese Karte. Referenz „TCGplayer market“ wählen oder Angebote eintragen.' };
   const v = cm[field];
-  if (v == null) return { error: `cardmarket["${field}"] fehlt für diese Karte.` };
-  return { value: v, label: `cardmarket["${field}"]`, date: cm.updated, dateLabel: 'Preisstand', isApi: true, field };
+  if (v == null) return { error: `${cmLabel(field)} ist für diese Karte nicht verfügbar. Andere Quelle wählen.` };
+  return { value: v, label: cmLabel(field), date: cm.updated, dateLabel: 'Preisstand', isApi: true, field };
 }
 
 function updateCalc() {
@@ -891,25 +985,24 @@ function updateCalc() {
       <div class="sub">Netto <b>${eur(r.netto)}</b> · Gewinn <b class="${l80.gewinn >= 0 ? 'pos' : 'neg'}">${eur(l80.gewinn)}</b> · Rendite <b>${pct(l80.rendite)}</b></div>
     </div>
     <h3>Herleitung</h3>
-    <div class="line"><span>Referenz (${esc(ref.label)})</span><b>${eur(ref.value)}</b></div>
-    <p class="date">${ref.dateLabel}: ${dt(ref.date)}</p>
-    <div class="line"><span>Zustandsfaktor = ${f2(settings.cf[cur.myCond])} / ${f2(settings.cf[cur.refCond])} (${cur.myCond}/${cur.refCond})</span><b>${f2(r.zf)}</b></div>
-    <div class="line"><span>Sprachfaktor = ${f2(settings.lf[cur.myLang])} / ${f2(settings.lf[cur.refLang])} (${cur.myLang}/${cur.refLang})</span><b>${f2(r.sf)}</b></div>
-    <div class="line"><span>Gesamtfaktor (multipliziert)</span><b>${f2(r.faktor)}</b></div>
-    <div class="line"><span>Brutto = Referenz × Faktoren</span><b>${eur(r.brutto)}</b></div>
-    <div class="line"><span>Netto = Brutto × (1 − ${n2(pf.provision * 100)} %) − ${eur(pf.versand)}</span><b class="big">${eur(r.netto)}</b></div>
+    <div class="line"><span>Ausgangspreis: ${esc(ref.label)}</span><b>${eur(ref.value)}</b></div>
+    <p class="date">${ref.dateLabel} ${dt(ref.date)}</p>
+    ${cur.myCond !== cur.refCond ? `<div class="line"><span>Zustand ${cur.myCond} statt ${cur.refCond}</span><b>× ${f2(r.zf)}</b></div>` : ''}
+    ${cur.myLang !== cur.refLang ? `<div class="line"><span>Sprache ${esc(LANG_LABELS[cur.myLang] || cur.myLang)} statt ${esc(LANG_LABELS[cur.refLang] || cur.refLang)}</span><b>× ${f2(r.sf)}</b></div>` : ''}
+    <div class="line"><span>Verkaufswert deiner Karte</span><b>${eur(r.brutto)}</b></div>
+    <div class="line"><span>Abzüglich ${fmt1(pf.provision * 100)} % Gebühr und ${eur(pf.versand)} Versand (${esc(pf.label)})</span><b class="big">${eur(r.netto)}</b></div>
     <h3>Ankaufsleiter</h3>
     <table class="ladder">
-      <tr><th>Stufe</th><th>Max. Gebot</th><th>Gewinn</th><th>Rendite</th></tr>
+      <tr><th>Ankauf bei</th><th>Höchstens zahlen</th><th>Gewinn</th><th>Rendite</th></tr>
       ${r.ladder.map((l) => `<tr class="${l.highlight ? 'hl' : ''}"><td>${Math.round(l.p * 100)} %</td><td>${eur(l.maxGebot)}</td><td>${eur(l.gewinn)}</td><td>${pct(l.rendite)}</td></tr>`).join('')}
     </table>
     <h3>Preis je Zustand (${esc(LANG_LABELS[cur.myLang] || cur.myLang)})</h3>
     <table class="ladder cond-table">
-      <tr><th>Zustand</th><th>Marktwert</th><th>Netto</th><th>Max. Gebot 80 %</th></tr>
+      <tr><th>Zustand</th><th>Verkaufswert</th><th>Nach Kosten</th><th>Höchstens zahlen (80 %)</th></tr>
       ${preiseJeZustand({ referenz: ref.value, cf: settings.cf, refZustand: cur.refCond, sprachFaktor: r.sf, provision: pf.provision, versand: pf.versand })
         .map((z) => `<tr data-cond="${z.zustand}" class="${z.zustand === cur.myCond ? 'hl' : ''}"><td>${z.zustand} <span class="meta">${CONDITION_LABELS[z.zustand] || ''}</span></td><td>${eur(z.brutto)}</td><td>${eur(z.netto)}</td><td>${eur(z.maxGebot80)}</td></tr>`).join('')}
     </table>
-    <p class="date">Aus der Referenz (${cur.refCond}) über deine Zustandsfaktoren abgeleitet. Zeile antippen, um den Zustand deiner Karte zu wählen.</p>
+    <p class="date">Abgeleitet vom Ausgangspreis (${cur.refCond}) über deine Zustandsfaktoren. Zeile antippen, um den Zustand deiner Karte zu wählen.</p>
     ${r.netto <= 0 ? '<div class="warn">Netto ist null oder negativ. Bei diesen Kosten lohnt sich kein Ankauf.</div>' : ''}
     ${r.unterMindest ? `<div class="warn">Netto unter ${eur(settings.minNetto)}: Der Flip trägt sich einzeln nicht, er lohnt sich nur im Sammelversand.</div>` : ''}`;
   const buy = $('#inv-buy');
@@ -952,6 +1045,7 @@ async function saveToInventory() {
     pricing: cur.pricing,
     fetchedAt: cur.fetchedAt,
     grading: cur.grading || null,
+    gradedApi: cur.gradedApi && cur.gradedApi.status === 'ok' ? { data: cur.gradedApi.data, fetchedAt: cur.gradedApi.fetchedAt } : null,
     graded: cur.graded && Object.keys(cur.graded).length ? cur.graded : null,
     createdAt: Date.now(),
   };
@@ -967,11 +1061,11 @@ function itemValue(it) {
   const tpm = it.marketField === 'tcgp' && it.pricing ? tpMarket(it.pricing) : null;
   if (tpm && fx) {
     ref = tpm.usd * fx.rate;
-    src = `TCGplayer ${tpm.variant} market`;
+    src = `TCGplayer Marktpreis ${tpVariant(tpm.variant)}`;
     date = tpm.updated;
   } else if (cm && cm[it.marketField] != null) {
     ref = cm[it.marketField];
-    src = `cardmarket["${it.marketField}"]`;
+    src = cmLabel(it.marketField);
     date = cm.updated;
   } else if (it.manualRef) {
     ref = it.manualRef.value;
@@ -1039,10 +1133,10 @@ function invItemHtml(it) {
     ${img(it.image, 'low', it.name)}
     <div>
       <div class="n">${esc(it.name)}</div>
-      <div class="meta">${esc(it.setName)} · ${esc(it.localId)}${it.official ? '/' + it.official : ''} · ${esc(LANG_LABELS[it.sprache] || it.sprache)} · ${esc(it.zustand)}</div>
+      <div class="meta">${esc(it.setName)} · Nr. ${esc(it.localId)}${it.official ? '/' + it.official : ''} · ${esc(LANG_LABELS[it.sprache] || it.sprache)} · ${esc(it.zustand)}</div>
       <div class="meta"><span class="tag">${statusLbl}</span> Einkauf ${eur(it.einkauf)} · ${esc(it.datum)}${it.status === 'verkauft' ? ` · Verkauf ${eur(it.verkauf)}` : ''}</div>
-      ${v.ref != null ? `<div class="date">Referenz ${eur(v.ref)} · ${esc(v.src)} · Preisstand ${dt(v.date)}</div>` : '<div class="date">Kein Preis vorhanden</div>'}
-      <div class="date">Abgerufen ${dt(it.fetchedAt)}</div>
+      ${v.ref != null ? `<div class="date">${esc(v.src)}: ${eur(v.ref)} · Stand ${dt(v.date)}</div>` : '<div class="date">Kein Marktpreis vorhanden</div>'}
+      <div class="date">Preise abgerufen am ${dt(it.fetchedAt)}</div>
       ${it.grading ? `<div class="meta"><span class="grade-badge">PSA ~${it.grading.overall} geschätzt</span></div>` : ''}
       ${it.notiz ? `<div class="meta">${esc(it.notiz)}</div>` : ''}
     </div>
@@ -1195,6 +1289,13 @@ function renderSettings() {
       <label class="row" style="margin-top:10px"><span>Netto-Minimum €</span><input id="set-min" inputmode="decimal" value="${n2(settings.minNetto)}" /></label>
     </div>
     <div class="card">
+      <h2>Graded-Preise (Pokemon Price Tracker)</h2>
+      <label>API-Schlüssel<input id="set-ppt" type="password" autocomplete="off" placeholder="pokeprice_…" value="${esc(settings.pptKey || '')}" /></label>
+      <p class="hint">Kostenlos: 100 Abrufe pro Tag, eine Karte mit Graded-Preisen kostet 2. Schlüssel holen unter <a href="https://www.pokemonpricetracker.com/api" target="_blank" rel="noopener">pokemonpricetracker.com/api</a>. Er bleibt auf diesem Gerät und geht nur über deinen eigenen Cloudflare-Worker an Pokemon Price Tracker.</p>
+      <button id="set-ppt-test" class="block">Verbindung testen</button>
+      <p id="set-ppt-result" class="status"></p>
+    </div>
+    <div class="card">
       <h2>Datenquelle</h2>
       <label>USD→EUR-Kurs manuell (leer = EZB-Kurs automatisch)<input id="set-fx" inputmode="decimal" placeholder="${fx && !fx.manual ? 'aktuell ' + fx.rate.toLocaleString('de-DE', { maximumFractionDigits: 4 }) : 'z. B. 0,91'}" value="${settings.usdEurManual ? String(settings.usdEurManual).replace('.', ',') : ''}" /></label>
       <label>API-Basis-URL (TCGdex oder eigener Proxy)<input id="set-api" value="${esc(settings.apiBase)}" /></label>
@@ -1235,6 +1336,31 @@ function renderSettings() {
     else p.versand = v;
   }));
   onNum($('#set-min'), (v) => (settings.minNetto = v));
+  $('#set-ppt').addEventListener('change', (e) => {
+    settings.pptKey = e.target.value.trim();
+    saveSettings();
+    toast(settings.pptKey ? 'Schlüssel gespeichert' : 'Schlüssel entfernt');
+  });
+  $('#set-ppt-test').addEventListener('click', async () => {
+    const out = $('#set-ppt-result');
+    settings.pptKey = $('#set-ppt').value.trim();
+    saveSettings();
+    out.className = 'status';
+    out.textContent = 'Teste …';
+    try {
+      const res = await fetch('/api/graded-test', { headers: settings.pptKey ? { 'X-PPT-Key': settings.pptKey } : {} });
+      const ct = res.headers.get('content-type') || '';
+      if (!ct.includes('json')) throw new Error('Nur in der Online-Version (Cloudflare) testbar.');
+      if (res.status === 501) throw new Error('Kein Schlüssel eingetragen.');
+      if (res.status === 401) throw new Error('Schlüssel ungültig.');
+      if (!res.ok) throw new Error('Fehler ' + res.status);
+      out.className = 'status ok';
+      out.textContent = 'Verbindung steht. Graded-Preise sind jetzt in der Bewertung verfügbar.';
+    } catch (err) {
+      out.className = 'status err';
+      out.textContent = err.message;
+    }
+  });
   $('#set-fx').addEventListener('change', async (e) => {
     const v = parseNum(e.target.value);
     settings.usdEurManual = v && v > 0 ? v : null;
@@ -1314,6 +1440,7 @@ function initGrading() {
       show('eval');
       renderGradingSum();
       renderGraded();
+      renderGradedApi();
     },
   });
 }

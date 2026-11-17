@@ -9,6 +9,10 @@ export const HIGHLIGHT_P = 0.8;
 export const CONDITION_LABELS = {
   MT: 'Mint', NM: 'Near Mint', EX: 'Excellent', GD: 'Good', LP: 'Light Played', PL: 'Played', PO: 'Poor',
 };
+/** Deutsche Kurzbeschreibung der Cardmarket-Zustände. */
+export const CONDITION_DE = {
+  MT: 'neuwertig', NM: 'fast neuwertig', EX: 'sehr gut', GD: 'gut', LP: 'leicht bespielt', PL: 'bespielt', PO: 'stark bespielt',
+};
 export const LANG_LABELS = {
   en: 'Englisch', ja: 'Japanisch', de: 'Deutsch', fr: 'Französisch', it: 'Italienisch',
   es: 'Spanisch', ko: 'Koreanisch', zh: 'Chinesisch',
@@ -26,6 +30,7 @@ export const DEFAULT_SETTINGS = {
   searchLang: 'de',
   apiBase: 'https://api.tcgdex.net/v2',
   usdEurManual: null,
+  pptKey: '',
 };
 
 /** Statistik über die angehakten Preise. */

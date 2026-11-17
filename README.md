@@ -83,7 +83,9 @@ Eigener Reiter „Grading“: Foto vorne/hinten per Kamera oder aus der Galerie.
 
 Dokumentation: Fotos werden mit Messlinien und nummerierten Mängeln gespeichert; „Bericht teilen“ erzeugt ein PNG (Note, Teilnoten, Zentrierung, Fotos, Mängelliste) für das Teilen-Menü bzw. als Download. Im Bestand steht die Dokumentation bei der Karte.
 
-Graded-Preise: eBay-Deep-Link „verkauft“ mit Note (PSA 10, 9, … BGS, CGC), Preise je Note von Hand mit Median. Eine Graded-Preis-API ist nicht eingebunden (keine kostenlose ohne Anmeldung).
+Graded-Preise automatisch: über Pokemon Price Tracker (`/api/v2/cards?tcgPlayerId=…&includeEbay=true`, Antwort `ebay.salesByGrade` mit `psa10`, `psa9`, `cgc9_5`, `bgs10` …: Anzahl, Durchschnitt, Median, Min/Max, Trend, `smartMarketPrice`). Die exakte TCGplayer-ID liefert TCGdex mit (`pricing.tcgplayer.<variante>.productId`), daher keine Namensraterei; ohne ID Suche „Name Nummer/Gesamt“ mit `limit=1`. Kosten 2 Credits pro Karte (Free: 100/Tag), Abfrage nur per Knopf, Ergebnis 24 h im Gerät und im Worker gecacht. Der Schlüssel wird unter Optionen eingetragen und per Header `X-PPT-Key` an den eigenen Worker geschickt (alternativ als Worker-Secret `PPT_API_KEY`). Direkt aus dem Browser geht es nicht: die CORS-Vorabanfrage beantwortet die API mit 401.
+
+Graded-Preise manuell: eBay-Deep-Link „verkauft“ mit Note (PSA 10, 9, … BGS, CGC), Preise je Note von Hand mit Median. Eine Graded-Preis-API ist nicht eingebunden (keine kostenlose ohne Anmeldung).
 
 ## Nicht enthalten
 

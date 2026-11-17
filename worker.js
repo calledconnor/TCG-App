@@ -1,8 +1,9 @@
 // Cloudflare Worker: liefert die statische App aus und stellt zwei kleine Hilfs-Endpunkte bereit.
 //   /api/fx            USD->EUR-Kurs (EZB über frankfurter.dev), 12 h gecacht
+//   /api/graded        Graded-Preise (Pokemon Price Tracker, Schlüssel per Secret PPT_API_KEY oder Header X-PPT-Key), 24 h gecacht
 //   /api/tcgdex/...    GET-Proxy zu https://api.tcgdex.net/v2/... (Fallback, falls der Browser TCGdex blockt), 24 h gecacht
 // Alles andere: statische Dateien (env.ASSETS).
-const JSON_HDR = { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' };
+const JSON_HDR = { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'X-PPT-Key, Content-Type' };
 
 async function cached(ctx, key, ttl, produce) {
   const cache = caches.default;
@@ -36,6 +37,32 @@ export default {
           const d = await r.json();
           return new Response(JSON.stringify({ rate: d.rates.EUR, date: d.date, source: 'EZB' }), { headers: JSON_HDR });
         });
+      }
+
+      // Graded-Preise (PSA/CGC/BGS) über Pokemon Price Tracker. Schlüssel: Worker-Secret PPT_API_KEY oder Header X-PPT-Key.
+      if (url.pathname === '/api/graded' || url.pathname === '/api/graded-test') {
+        const key = env.PPT_API_KEY || request.headers.get('x-ppt-key');
+        if (!key) return new Response(JSON.stringify({ error: 'not_configured' }), { status: 501, headers: JSON_HDR });
+        let target;
+        if (url.pathname === '/api/graded-test') {
+          target = 'https://www.pokemonpricetracker.com/api/v2/sets?limit=1';
+        } else {
+          const id = url.searchParams.get('tcgPlayerId');
+          const q = url.searchParams.get('q');
+          if (id && /^\d+$/.test(id)) target = `https://www.pokemonpricetracker.com/api/v2/cards?tcgPlayerId=${id}&includeEbay=true`;
+          else if (q) target = `https://www.pokemonpricetracker.com/api/v2/cards?search=${encodeURIComponent(q.slice(0, 100))}&limit=1&includeEbay=true`;
+          else return new Response(JSON.stringify({ error: 'missing_param' }), { status: 400, headers: JSON_HDR });
+        }
+        const run = async () => {
+          const r = await fetch(target, { headers: { Authorization: 'Bearer ' + key, Accept: 'application/json' } });
+          const body = await r.text();
+          return new Response(body, { status: r.status, headers: { ...JSON_HDR, 'X-API-Calls-Consumed': r.headers.get('x-api-calls-consumed') || '' } });
+        };
+        // Preise sind öffentlich: Cache je Ziel-URL (nicht je Schlüssel), Test nie cachen
+        if (url.pathname === '/api/graded-test') {
+          try { return await run(); } catch (e) { return new Response(JSON.stringify({ error: String(e) }), { status: 502, headers: JSON_HDR }); }
+        }
+        return cached(ctx, target, 24 * 3600, run);
       }
 
       if (url.pathname.startsWith('/api/tcgdex/')) {
