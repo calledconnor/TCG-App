@@ -193,3 +193,21 @@ export async function englishName(id) {
     return null;
   }
 }
+
+/** USD->EUR-Kurs der EZB (frankfurter.dev, kostenlos, CORS offen). 24 h in IndexedDB gecacht. */
+export async function usdEur() {
+  const url = 'https://api.frankfurter.dev/v1/latest?base=USD&symbols=EUR';
+  let cached;
+  try { cached = await db.get('cache', url); } catch {}
+  if (cached && Date.now() - cached.fetchedAt < DAY) return { rate: cached.data.rates.EUR, date: cached.data.date };
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (!data?.rates?.EUR) throw new Error('kein Kurs');
+    db.put('cache', { url, data, status: 200, fetchedAt: Date.now() }).catch(() => {});
+    return { rate: data.rates.EUR, date: data.date };
+  } catch {
+    return cached ? { rate: cached.data.rates.EUR, date: cached.data.date, stale: true } : null;
+  }
+}

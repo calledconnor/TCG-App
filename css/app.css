@@ -233,3 +233,5 @@ tr:last-child td { border-bottom: 0; }
 code { font-size: 12px; background: var(--sunken); padding: 1px 6px; border-radius: 6px; }
 .hero .sub b.pos { color: var(--pos); }
 .hero .sub b.neg { color: var(--neg); }
+.cond-table tr[data-cond] { cursor: pointer; }
+.cond-table td .meta { font-size: 11px; }

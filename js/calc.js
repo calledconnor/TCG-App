@@ -25,6 +25,7 @@ export const DEFAULT_SETTINGS = {
   minNetto: 25,
   searchLang: 'de',
   apiBase: 'https://api.tcgdex.net/v2',
+  usdEurManual: null,
 };
 
 /** Statistik über die angehakten Preise. */
@@ -106,4 +107,13 @@ export function localIdVariants(number) {
   const n = String(parseInt(digits, 10));
   const set = new Set([s, pre + n, pre + n.padStart(2, '0'), pre + n.padStart(3, '0')]);
   return [...set];
+}
+
+/** Preise je Zustand: Referenz über CF-Verhältnis auf jeden Zustand umgerechnet (inkl. Sprachfaktor). */
+export function preiseJeZustand({ referenz, cf, refZustand, sprachFaktor: sf = 1, provision, versand }) {
+  return Object.keys(cf).map((z) => {
+    const brutto = referenz * (cf[z] / cf[refZustand]) * sf;
+    const netto = brutto * (1 - provision) - versand;
+    return { zustand: z, brutto, netto, maxGebot80: netto * 0.8 };
+  });
 }

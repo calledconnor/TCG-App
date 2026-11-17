@@ -74,3 +74,14 @@ test('localIdVariants für TCGdex (6/06/006)', () => {
   assert.deepEqual(localIdVariants('097').sort(), ['097', '97']);
   assert.ok(localIdVariants('TG05').includes('TG05'));
 });
+
+test('preiseJeZustand: NM-Referenz 100 € -> PO 22 €, inkl. Sprachfaktor', async () => {
+  const { preiseJeZustand } = await import('../js/calc.js');
+  const rows = preiseJeZustand({ referenz: 100, cf: DEFAULT_CF, refZustand: 'NM', sprachFaktor: 1, provision: 0.05, versand: 0 });
+  const po = rows.find((r) => r.zustand === 'PO');
+  close(po.brutto, 22);
+  close(po.netto, 22 * 0.95);
+  const lp = preiseJeZustand({ referenz: 100, cf: DEFAULT_CF, refZustand: 'NM', sprachFaktor: 0.63, provision: 0, versand: 0 }).find((r) => r.zustand === 'LP');
+  close(lp.brutto, 28.35);
+  assert.equal(rows.length, 7);
+});

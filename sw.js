@@ -1,6 +1,6 @@
 // Offline: App-Shell vorab cachen, Kartenbilder und OCR-Dateien bei Gebrauch.
 // API-Antworten liegen in IndexedDB (siehe js/api.js), nicht hier.
-const VERSION = 'kw-v1';
+const VERSION = 'kw-v2';
 const SHELL = [
   './', 'index.html', 'css/app.css', 'js/app.js', 'js/api.js', 'js/calc.js', 'js/db.js', 'js/ocr.js',
   'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',

@@ -1,10 +1,10 @@
 import {
   DEFAULT_SETTINGS, CONDITION_LABELS, LANG_LABELS, LADDER,
-  stats, evaluate, marktwert, parsePrices, parseCardNumber,
+  stats, evaluate, marktwert, parsePrices, parseCardNumber, preiseJeZustand,
 } from './calc.js';
 import {
   ALL_LANGS, setApiBase, probeLanguages, searchByName, searchByNumber,
-  getCard, extractPricing, englishName, setIdOf, getSets,
+  getCard, extractPricing, englishName, setIdOf, getSets, usdEur,
 } from './api.js';
 import { db, kvGet, kvSet } from './db.js';
 
@@ -13,9 +13,7 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmtEur = new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' });
-const fmtUsd = new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'USD' });
 const eur = (v) => (v == null || !Number.isFinite(v) ? '–' : fmtEur.format(v));
-const usd = (v) => (v == null || !Number.isFinite(v) ? '–' : fmtUsd.format(v));
 const n2 = (v) => (v == null || !Number.isFinite(v) ? '–' : v.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 const pct = (v) => (v == null || !Number.isFinite(v) ? '–' : (v * 100).toLocaleString('de-DE', { maximumFractionDigits: 1 }) + ' %');
 const dt = (v) => {
@@ -47,6 +45,7 @@ let settings = structuredClone(DEFAULT_SETTINGS);
 let langAvail = {};
 let inventory = [];
 let cur = null; // aktuelle Bewertung
+let fx = null; // { rate, date, manual } USD->EUR
 
 async function loadSettings() {
   const s = await kvGet('settings', null);
@@ -359,12 +358,13 @@ function renderEval() {
       </table>
       <p class="date">Preisstand Cardmarket: <b>${dt(cm.updated)}</b></p>`
     : '<p class="hint">Keine Cardmarket-Daten bei TCGdex für diese Karte.</p>';
+  const toEur = (v) => (v != null && fx ? eur(v * fx.rate) : '–');
   const tpHtml = tp && tp.variants.length
     ? `<table>
-        <tr><th>TCGplayer (USD)</th><th>low</th><th>mid</th><th>market</th><th>high</th></tr>
-        ${tp.variants.map((v) => `<tr><td>${esc(v.key)}</td><td>${usd(v.fields.lowPrice)}</td><td>${usd(v.fields.midPrice)}</td><td>${usd(v.fields.marketPrice)}</td><td>${usd(v.fields.highPrice)}</td></tr>`).join('')}
+        <tr><th>TCGplayer (in EUR)</th><th>low</th><th>mid</th><th>market</th><th>high</th></tr>
+        ${tp.variants.map((v) => `<tr><td>${esc(v.key)}</td><td>${toEur(v.fields.lowPrice)}</td><td>${toEur(v.fields.midPrice)}</td><td>${toEur(v.fields.marketPrice)}</td><td>${toEur(v.fields.highPrice)}</td></tr>`).join('')}
       </table>
-      <p class="date">Preisstand TCGplayer: <b>${dt(tp.updated)}</b> · nur zur Info, nicht im Rechenmodell</p>`
+      <p class="date">Preisstand TCGplayer: <b>${dt(tp.updated)}</b> · ${fx ? `umgerechnet zum ${fx.manual ? 'manuellen Kurs' : 'EZB-Kurs vom ' + new Date(fx.date).toLocaleDateString('de-DE')} (1 USD = ${fx.rate.toLocaleString('de-DE', { maximumFractionDigits: 4 })} EUR)` : 'kein Wechselkurs verfügbar, Kurs in den Einstellungen eintragen'} · US-Markt, nur zur Info</p>`
     : '<p class="hint">Keine TCGplayer-Daten bei TCGdex.</p>';
 
   const condOpts = (sel) => Object.keys(settings.cf).map((k) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${k} – ${CONDITION_LABELS[k] || k}</option>`).join('');
@@ -432,7 +432,7 @@ function renderEval() {
       </label>
       <label class="row" id="row-custom"><span>Eigener Wert</span><input id="ref-custom" inputmode="decimal" placeholder="€" value="${esc(cur.custom)}" /></label>
       <div class="grid2">
-        <label>Zustand Referenz<select id="ref-cond">${condOpts(cur.refCond)}</select></label>
+        <label>Zustand der Referenz<select id="ref-cond">${condOpts(cur.refCond)}</select></label>
         <label>Sprache Referenz<select id="ref-lang">${langOpts(cur.refLang)}</select></label>
       </div>
       <h3>Meine Karte</h3>
@@ -645,10 +645,24 @@ function updateCalc() {
       <tr><th>Stufe</th><th>Max. Gebot</th><th>Gewinn</th><th>Rendite</th></tr>
       ${r.ladder.map((l) => `<tr class="${l.highlight ? 'hl' : ''}"><td>${Math.round(l.p * 100)} %</td><td>${eur(l.maxGebot)}</td><td>${eur(l.gewinn)}</td><td>${pct(l.rendite)}</td></tr>`).join('')}
     </table>
+    <h3>Preis je Zustand (${esc(LANG_LABELS[cur.myLang] || cur.myLang)})</h3>
+    <table class="ladder cond-table">
+      <tr><th>Zustand</th><th>Marktwert</th><th>Netto</th><th>Max. Gebot 80 %</th></tr>
+      ${preiseJeZustand({ referenz: ref.value, cf: settings.cf, refZustand: cur.refCond, sprachFaktor: r.sf, provision: pf.provision, versand: pf.versand })
+        .map((z) => `<tr data-cond="${z.zustand}" class="${z.zustand === cur.myCond ? 'hl' : ''}"><td>${z.zustand} <span class="meta">${CONDITION_LABELS[z.zustand] || ''}</span></td><td>${eur(z.brutto)}</td><td>${eur(z.netto)}</td><td>${eur(z.maxGebot80)}</td></tr>`).join('')}
+    </table>
+    <p class="date">Aus der Referenz (${cur.refCond}) über deine Zustandsfaktoren abgeleitet. Zeile antippen, um den Zustand deiner Karte zu wählen.</p>
     ${r.netto <= 0 ? '<div class="warn">Netto ist null oder negativ. Bei diesen Kosten lohnt sich kein Ankauf.</div>' : ''}
     ${r.unterMindest ? `<div class="warn">Netto unter ${eur(settings.minNetto)}: Der Flip trägt sich einzeln nicht, er lohnt sich nur im Sammelversand.</div>` : ''}`;
   const buy = $('#inv-buy');
   if (buy && !buy.value) buy.placeholder = `z. B. ${n2(r.ladder[1].maxGebot)} (80 %)`;
+  $$('.cond-table tr[data-cond]', out).forEach((tr) =>
+    tr.addEventListener('click', () => {
+      cur.myCond = tr.dataset.cond;
+      $('#my-cond').value = cur.myCond;
+      updateCalc();
+    }),
+  );
 }
 
 async function saveToInventory() {
@@ -893,6 +907,7 @@ function renderSettings() {
     </div>
     <div class="card">
       <h2>Datenquelle</h2>
+      <label>USD→EUR-Kurs manuell (leer = EZB-Kurs automatisch)<input id="set-fx" inputmode="decimal" placeholder="${fx && !fx.manual ? 'aktuell ' + fx.rate.toLocaleString('de-DE', { maximumFractionDigits: 4 }) : 'z. B. 0,91'}" value="${settings.usdEurManual ? String(settings.usdEurManual).replace('.', ',') : ''}" /></label>
       <label>API-Basis-URL (TCGdex oder eigener Proxy)<input id="set-api" value="${esc(settings.apiBase)}" /></label>
       <p class="hint">TCGdex erlaubt CORS (Access-Control-Allow-Origin: *), ein Proxy ist nicht nötig. Für den Notfall liegt in <code>proxy/</code> ein Cloudflare Worker.</p>
       <div class="grid2" style="margin-top:8px">
@@ -931,6 +946,13 @@ function renderSettings() {
     else p.versand = v;
   }));
   onNum($('#set-min'), (v) => (settings.minNetto = v));
+  $('#set-fx').addEventListener('change', async (e) => {
+    const v = parseNum(e.target.value);
+    settings.usdEurManual = v && v > 0 ? v : null;
+    saveSettings();
+    await loadFx();
+    toast(settings.usdEurManual ? 'Manueller Kurs gespeichert' : 'EZB-Kurs wird verwendet');
+  });
   $('#set-api').addEventListener('change', (e) => {
     settings.apiBase = e.target.value.trim() || DEFAULT_SETTINGS.apiBase;
     setApiBase(settings.apiBase);
@@ -981,6 +1003,12 @@ function renderSettings() {
   });
 }
 
+async function loadFx() {
+  if (settings.usdEurManual) fx = { rate: settings.usdEurManual, manual: true };
+  else fx = await usdEur().catch(() => null);
+  if (cur && $('#view-eval').classList.contains('active')) renderEval();
+}
+
 // ---------- Start ----------
 (async function init() {
   updateNet();
@@ -996,6 +1024,7 @@ function renderSettings() {
     })
     .catch(() => {});
   getSets(settings.searchLang).catch(() => {});
+  loadFx();
   refreshPrices(false);
   setInterval(() => refreshPrices(false), 30 * 60 * 1000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshPrices(false); });

@@ -20,6 +20,7 @@ Kamera und Service Worker brauchen HTTPS (bei allen genannten Hostern Standard).
 - Zwei Schritte: `GET /cards?name=…` liefert nur CardBrief (id, localId, name, image), erst `GET /cards/{id}` liefert `pricing`.
 - `pricing.cardmarket` (EUR): `avg, low, trend, avg1, avg7, avg30` und die Holo-Felder mit Bindestrich (`p["avg-holo"]` …). Wird nur per Klammerzugriff gelesen.
 - `pricing.tcgplayer` (USD): Varianten-Objekte mit `lowPrice, midPrice, highPrice, marketPrice, directLowPrice`. Neben `normal`/`reverse` liefert die API in der Praxis auch `holofoil` u. a.; alle vorhandenen Varianten werden angezeigt (nur Info, nicht im Rechenmodell).
+- **Alles in Euro:** TCGplayer-Werte werden zum EZB-Kurs (`api.frankfurter.dev`, kostenlos, CORS offen, 24 h gecacht) umgerechnet; Kurs und Kursdatum stehen daneben. Offline oder auf Wunsch gilt ein manueller Kurs aus den Einstellungen.
 - Fehlende Marktplätze/Felder werden defensiv als „–“ behandelt.
 
 Live geprüft am 17.11.2026:
@@ -59,6 +60,10 @@ rendite(p)  = gewinn(p) / maxGebot(p)
 Referenz: Median (Standard), Durchschnitt, Minimum der angehakten Angebote, `cardmarket.trend`/`avg7`/`avg30` (wahlweise Holo-Felder) oder ein eigener Wert. CF, LF, Provision, Versand und Netto-Minimum sind in den Einstellungen editierbar und werden lokal (IndexedDB) gespeichert. Versand ist standardmäßig 0 €, bitte eigenen Wert eintragen.
 
 Gegenprobe (Test): englisch NM → deutsch LP = 0,45 × 0,63 = 0,2835. Rendite bei 70 % = 42,9 %.
+
+## Preis je Zustand
+
+TCGdex/Cardmarket-Preisindex hat **keine** getrennten Preise pro Zustand. Die Bewertung zeigt deshalb eine Tabelle MT … PO, abgeleitet aus der Referenz über `CF[Zustand] / CF[Referenzzustand]` × Sprachfaktor, mit Marktwert, Netto und Max. Gebot 80 %. Echte Angebote eines bestimmten Zustands (Cardmarket-Filter „Zustand“) trägst du unter „Angebote“ ein und stellst „Zustand der Referenz“ entsprechend ein.
 
 ## Bestand
 
