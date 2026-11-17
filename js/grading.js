@@ -3,15 +3,38 @@
 
 /** Zentrierungs-Obergrenzen nach PSA (größerer Rand in %, Vorder-/Rückseite). */
 export const PSA_CENTERING = [
-  { grade: 10, front: 60, back: 75 },
-  { grade: 9, front: 65, back: 90 },
-  { grade: 8, front: 70, back: 90 },
-  { grade: 7, front: 75, back: 90 },
-  { grade: 6, front: 85, back: 90 },
-  { grade: 5, front: 90, back: 90 },
-  { grade: 4, front: 90, back: 90 },
+  { grade: 10, front: 55, back: 75 },
+  { grade: 9, front: 60, back: 90 },
+  { grade: 8, front: 65, back: 90 },
+  { grade: 7, front: 70, back: 90 },
+  { grade: 6, front: 80, back: 90 },
+  { grade: 5, front: 85, back: 90 },
+  { grade: 4, front: 85, back: 90 },
   { grade: 3, front: 90, back: 90 },
 ];
+/** CGC und BGS veröffentlichen keine exakten Grenzen – übliche Richtwerte. */
+export const CGC_CENTERING = [
+  { grade: 10, front: 55, back: 60 },
+  { grade: 9.5, front: 55, back: 75 },
+  { grade: 9, front: 60, back: 80 },
+  { grade: 8.5, front: 65, back: 85 },
+  { grade: 8, front: 70, back: 90 },
+  { grade: 7, front: 75, back: 90 },
+  { grade: 6, front: 80, back: 90 },
+];
+export const BGS_CENTERING = [
+  { grade: 10, front: 51, back: 55 },
+  { grade: 9.5, front: 55, back: 60 },
+  { grade: 9, front: 60, back: 70 },
+  { grade: 8.5, front: 65, back: 80 },
+  { grade: 8, front: 70, back: 90 },
+  { grade: 7, front: 75, back: 95 },
+  { grade: 6, front: 80, back: 95 },
+];
+export function capFor(table, worstFront, worstBack, floor = 5) {
+  for (const row of table) if (worstFront <= row.front && (worstBack == null || worstBack <= row.back)) return row.grade;
+  return floor;
+}
 
 export const DEFECT_TYPES = {
   surface: { label: 'Oberfläche', kinds: ['Kratzer', 'Delle', 'Druckfleck', 'Knick', 'Fleck', 'Holo-Kratzer'] },
@@ -305,6 +328,8 @@ export function createGrading({ root, getCard, onApply, toast }) {
           <button class="small" id="g-filter">Oberflächen-Filter</button>
           <button class="small" id="g-reset-lines">Linien zurücksetzen</button>
         </div>
+        <div class="g-live hidden" id="g-live"></div>
+        <div class="inline g-tools"><button class="small" id="g-fix">Foto fixieren</button><span class="hint" id="g-fix-hint">Seite lässt sich scrollen; Griffe direkt ziehen.</span></div>
         <p class="hint" id="g-help"></p>
         <div class="g-stage"><canvas id="g-canvas"></canvas></div>
       </div>
@@ -366,6 +391,7 @@ export function createGrading({ root, getCard, onApply, toast }) {
     $('#g-tools-measure', root).classList.toggle('hidden', m === 'straighten');
     draw();
     renderHelp();
+    renderLive();
   }
   $('#g-apply-straight', root).addEventListener('click', () => {
     const sd = side();
@@ -489,7 +515,63 @@ export function createGrading({ root, getCard, onApply, toast }) {
 
   // ---------- Zeichnen ----------
   const LINE_KEYS = ['outerL', 'outerR', 'outerT', 'outerB', 'innerL', 'innerR', 'innerT', 'innerB'];
+  /** Griff in der Mitte der jeweiligen Rechteckseite. */
+  function handlePos(k, L, w, h) {
+    const pre = k.startsWith('outer') ? 'outer' : 'inner';
+    const vertical = /L$|R$/.test(k);
+    return vertical
+      ? { vertical, x: L[k] * w, y: ((L[pre + 'T'] + L[pre + 'B']) / 2) * h }
+      : { vertical, x: ((L[pre + 'L'] + L[pre + 'R']) / 2) * w, y: L[k] * h };
+  }
+  /** Griff oder Linie unter dem Finger finden (Griffe haben Vorrang). */
+  function hitLine(p, sd) {
+    const L = sd.lines;
+    let best = null, bd = 34;
+    for (const k of LINE_KEYS) {
+      const hp = handlePos(k, L, p.w, p.h);
+      const d = Math.hypot(hp.x - p.x, hp.y - p.y);
+      if (d < bd) { bd = d; best = k; }
+    }
+    if (best) return best;
+    bd = 16;
+    for (const k of LINE_KEYS) {
+      const pre = k.startsWith('outer') ? 'outer' : 'inner';
+      const vertical = /L$|R$/.test(k);
+      const inSpan = vertical ? p.y >= L[pre + 'T'] * p.h && p.y <= L[pre + 'B'] * p.h : p.x >= L[pre + 'L'] * p.w && p.x <= L[pre + 'R'] * p.w;
+      if (!inSpan) continue;
+      const d = vertical ? Math.abs(p.x - L[k] * p.w) : Math.abs(p.y - L[k] * p.h);
+      if (d < bd) { bd = d; best = k; }
+    }
+    return best;
+  }
+  function hitCorner(p, sd) {
+    const k = p.w / sd.raw.width;
+    let best = null, bd = 40;
+    sd.corners.forEach(([x, y], i) => { const dd = Math.hypot(x * k - p.x, y * k - p.y); if (dd < bd) { bd = dd; best = i; } });
+    return best;
+  }
+  // Seite scrollbar lassen: nur wenn ein Griff berührt wird (oder das Foto fixiert ist), Scrollen unterbinden
+  st.fixed = false;
+  function applyFix() {
+    cv.style.touchAction = st.fixed ? 'none' : 'pan-y';
+    const b = $('#g-fix', root);
+    if (b) { b.classList.toggle('primary', st.fixed); b.textContent = st.fixed ? 'Foto fixiert' : 'Foto fixieren'; }
+    const hnt = $('#g-fix-hint', root);
+    if (hnt) hnt.textContent = st.fixed ? 'Seite ist gesperrt, alles am Foto bewegt nur Linien und Marker.' : 'Seite lässt sich scrollen; Griffe direkt ziehen.';
+  }
+  cv.addEventListener('touchstart', (e) => {
+    if (st.fixed) return e.preventDefault();
+    const sd = side();
+    if (!srcOf(sd) || e.touches.length !== 1) return;
+    const b = cv.getBoundingClientRect();
+    const t = e.touches[0];
+    const p = { x: t.clientX - b.left, y: t.clientY - b.top, w: b.width, h: b.height };
+    const onHandle = st.mode === 'straighten' ? hitCorner(p, sd) != null : st.mode === 'center' ? !!hitLine(p, sd) : false;
+    if (onHandle) e.preventDefault();
+  }, { passive: false });
   const srcOf = (sd) => (st.mode === 'straighten' ? sd.raw : sd.img);
+  $('#g-fix', root).addEventListener('click', () => { st.fixed = !st.fixed; applyFix(); });
+  applyFix();
   function geom() {
     const im = srcOf(side());
     const w = cv.clientWidth || 600;
@@ -521,19 +603,22 @@ export function createGrading({ root, getCard, onApply, toast }) {
       });
     }
     if (st.mode === 'center') {
+      for (const pre of ['outer', 'inner']) {
+        const col = pre === 'outer' ? '#ffd60a' : '#ff3b30';
+        const x1 = L[pre + 'L'] * w, x2 = L[pre + 'R'] * w, y1 = L[pre + 'T'] * h, y2 = L[pre + 'B'] * h;
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      }
       for (const k of LINE_KEYS) {
-        const vertical = /L$|R$/.test(k);
-        ctx.strokeStyle = k.startsWith('outer') ? '#ffd60a' : '#22d3ee';
-        ctx.lineWidth = st.drag === k ? 3 : 1.5;
+        const { x, y, vertical } = handlePos(k, L, w, h);
+        const active = st.drag === k;
+        const lw = vertical ? 12 : 40, lh = vertical ? 40 : 12;
+        ctx.fillStyle = k.startsWith('outer') ? '#ffd60a' : '#ff3b30';
         ctx.beginPath();
-        if (vertical) { ctx.moveTo(L[k] * w, 0); ctx.lineTo(L[k] * w, h); }
-        else { ctx.moveTo(0, L[k] * h); ctx.lineTo(w, L[k] * h); }
-        ctx.stroke();
-        // Griff
-        ctx.fillStyle = ctx.strokeStyle;
-        const gx = vertical ? L[k] * w : k.startsWith('outer') ? w * 0.25 : w * 0.75;
-        const gy = vertical ? (k.startsWith('outer') ? h * 0.25 : h * 0.75) : L[k] * h;
-        ctx.beginPath(); ctx.arc(gx, gy, 7, 0, Math.PI * 2); ctx.fill();
+        ctx.roundRect(x - lw / 2, y - lh / 2, lw, lh, 6);
+        ctx.fill();
+        if (active) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke(); }
       }
     }
     // Mängel
@@ -573,9 +658,7 @@ export function createGrading({ root, getCard, onApply, toast }) {
     if (!srcOf(sd)) return;
     const p = rel(e);
     if (st.mode === 'straighten') {
-      const k = p.w / sd.raw.width;
-      let best = null, bd = 40;
-      sd.corners.forEach(([x, y], i) => { const dd = Math.hypot(x * k - p.x, y * k - p.y); if (dd < bd) { bd = dd; best = i; } });
+      const best = hitCorner(p, sd);
       if (best != null) {
         st.drag = 'c' + best;
         cv.setPointerCapture(e.pointerId);
@@ -586,12 +669,7 @@ export function createGrading({ root, getCard, onApply, toast }) {
       return;
     }
     if (st.mode === 'center') {
-      let best = null, bd = 28;
-      for (const k of LINE_KEYS) {
-        const vertical = /L$|R$/.test(k);
-        const dist = vertical ? Math.abs(p.x - sd.lines[k] * p.w) : Math.abs(p.y - sd.lines[k] * p.h);
-        if (dist < bd) { bd = dist; best = k; }
-      }
+      const best = hitLine(p, sd);
       if (best) {
         st.drag = best;
         cv.setPointerCapture(e.pointerId);
@@ -600,6 +678,17 @@ export function createGrading({ root, getCard, onApply, toast }) {
         draw();
       }
     } else {
+      st.tap = { x: p.x, y: p.y, t: Date.now() };
+    }
+  });
+  cv.addEventListener('pointerup', (e) => {
+    const sd = side();
+    if (st.mode !== 'defect' || !st.tap || !srcOf(sd)) return;
+    const p = rel(e);
+    const moved = Math.hypot(p.x - st.tap.x, p.y - st.tap.y);
+    st.tap = null;
+    if (moved > 10) return; // war Scrollen, kein Tippen
+    {
       // vorhandenen Marker wählen oder neuen setzen
       const hit = sd.defects.find((d) => Math.hypot(d.x * p.w - p.x, d.y * p.h - p.y) < 16);
       if (hit) {
@@ -642,7 +731,7 @@ export function createGrading({ root, getCard, onApply, toast }) {
     draw();
   };
   cv.addEventListener('pointerup', endDrag);
-  cv.addEventListener('pointercancel', endDrag);
+  cv.addEventListener('pointercancel', () => { st.tap = null; endDrag(); });
 
   // ---------- Auswertung ----------
   function compute() {
@@ -660,7 +749,32 @@ export function createGrading({ root, getCard, onApply, toast }) {
     return { cf, cb, cap, auto, sub, overall: overallGrade({ cap, ...sub }), defects: all.length };
   }
 
+  function renderLive() {
+    const el = $('#g-live', root);
+    if (!el) return;
+    const sd = side();
+    const show = st.mode === 'center' && sd.img;
+    el.classList.toggle('hidden', !show);
+    if (!show) return;
+    const c = centering(sd.lines);
+    const f = st.sides.front.img ? centering(st.sides.front.lines) : null;
+    const b = st.sides.back.img ? centering(st.sides.back.lines) : null;
+    const wf = f ? f.worst : c.worst, wb = b ? b.worst : null;
+    const g = (v) => String(v).replace('.', ',');
+    el.innerHTML = `
+      <div class="g-live-ratios">
+        <div><span>L/R</span><b>${Math.round(c.lr)}/${Math.round(100 - c.lr)}</b></div>
+        <div><span>O/U</span><b>${Math.round(c.tb)}/${Math.round(100 - c.tb)}</b></div>
+      </div>
+      <div class="g-live-grades">
+        <div><span>PSA</span><b>${g(capFor(PSA_CENTERING, wf, wb, 2))}</b></div>
+        <div><span>CGC</span><b>${g(capFor(CGC_CENTERING, wf, wb, 5))}</b></div>
+        <div><span>BGS</span><b>${g(capFor(BGS_CENTERING, wf, wb, 5))}</b></div>
+      </div>`;
+  }
+
   function renderCenter() {
+    renderLive();
     const r = compute();
     const row = (title, c, limitKey) => {
       if (!c) return `<div class="line"><span>${title}</span><b>kein Foto</b></div>`;
@@ -675,7 +789,7 @@ export function createGrading({ root, getCard, onApply, toast }) {
       ${row('Vorne', r.cf)}
       ${row('Hinten', r.cb)}
       <div class="line"><span>Zentrierung erlaubt höchstens</span><b>PSA ${r.cap}</b></div>
-      <p class="date">PSA-Richtlinie (Vorderseite/Rückseite, größerer Rand): PSA 10 ≤ 60/40 und ≤ 75/25 · PSA 9 ≤ 65/35 und ≤ 90/10 · PSA 8 ≤ 70/30 · PSA 7 ≤ 75/25 · PSA 6 ≤ 85/15.</p>`;
+      <p class="date">PSA (offiziell, größerer Rand vorne/hinten): 10 ≤ 55/45 und ≤ 75/25 · 9 ≤ 60/40 und ≤ 90/10 · 8 ≤ 65/35 · 7 ≤ 70/30 · 6 ≤ 80/20. CGC und BGS veröffentlichen keine exakten Grenzen; die Werte oben sind übliche Richtwerte (BGS am strengsten).</p>`;
   }
 
   function renderDefects() {

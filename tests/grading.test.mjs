@@ -13,11 +13,12 @@ test('Zentrierung 50/50 und 60/40', () => {
 
 test('PSA-Zentrierungsgrenzen', () => {
   assert.equal(centeringCap(55, 70), 10);
-  assert.equal(centeringCap(60, null), 10);
-  assert.equal(centeringCap(62, null), 9);
+  assert.equal(centeringCap(55, null), 10);
+  assert.equal(centeringCap(57, null), 9); // Beispiel 57/43 -> PSA 9
+  assert.equal(centeringCap(62, null), 8);
   assert.equal(centeringCap(55, 80), 9); // Rückseite 80/20 -> nicht 10
-  assert.equal(centeringCap(72, null), 7);
-  assert.equal(centeringCap(88, null), 5);
+  assert.equal(centeringCap(68, null), 7);
+  assert.equal(centeringCap(84, null), 5);
 });
 
 test('Teilnoten und Gesamtnote', () => {

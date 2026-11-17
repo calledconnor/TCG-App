@@ -123,8 +123,16 @@ function enrich(list, sets) {
  * Ergebnis nach Relevanz sortiert, jedes Element trägt seine Sprache (lang).
  */
 export async function searchSmart(lang, name, available = {}) {
-  const q = name.trim();
+  let q = name.trim();
   if (!q) return [];
+  // Nummer im Suchtext ("Rayquaza VMAX 218", "218/203", "#TG29") herauslösen
+  let numFilter = null, totFilter = null;
+  const nm = q.match(/(?:^|\s)#?([A-Za-z]{0,4}\d{1,3})(?:\s*\/\s*([A-Za-z]{0,4}\d{1,3}))?\s*$/);
+  if (nm && /\d/.test(nm[1]) && q.replace(nm[0], '').trim()) {
+    numFilter = nm[1].toUpperCase().replace(/^([A-Z]*)0+(\d)/, '$1$2');
+    totFilter = nm[2] ? parseInt(nm[2].replace(/^[A-Za-z]+/, ''), 10) : null;
+    q = q.replace(nm[0], '').trim();
+  }
   const langs = [...new Set([lang, 'en', 'de'])].filter((l) => available[l] !== false);
   const variants = new Set([q]);
   if (/\s/.test(q)) variants.add(q.replace(/\s+/g, '-'));
@@ -165,7 +173,30 @@ export async function searchSmart(lang, name, available = {}) {
     if (words.every((w) => n.includes(w))) return 3;
     return 4;
   };
-  return [...merged.values()]
+  // fehlende Bilder: Pfad aus einer anderen Karte desselben Sets ableiten (englische Ausgabe hat fast immer Bilder)
+  const setBase = {};
+  for (const c of merged.values()) {
+    const m = c.image && c.image.match(/^(https:\/\/assets\.tcgdex\.net\/)[^/]+(\/.+\/)[^/]+$/);
+    if (m && !setBase[c.setId]) setBase[c.setId] = m;
+  }
+  for (const c of merged.values()) {
+    if (!c.image && setBase[c.setId]) c.image = setBase[c.setId][1] + 'en' + setBase[c.setId][2] + c.localId;
+  }
+  // weiterhin ohne Bild: englische Ausgabe derselben Karte abfragen (max. 24, 30 Tage gecacht)
+  const missing = [...merged.values()].filter((c) => !c.image).slice(0, 24);
+  await Promise.all(missing.map(async (c) => {
+    try {
+      const r = await getJSON(`/en/cards/${encodeURIComponent(c.id)}`, { maxAge: 30 * DAY });
+      if (r.data && r.data.image) c.image = r.data.image;
+    } catch {}
+  }));
+  const normId = (x) => String(x).toUpperCase().replace(/^([A-Z]*)0+(\d)/, '$1$2');
+  let list = [...merged.values()];
+  if (numFilter) {
+    const hit = list.filter((c) => normId(c.localId) === numFilter && (!totFilter || !c.setCount || c.setCount.official === totFilter || c.setCount.total === totFilter));
+    if (hit.length) list = hit;
+  }
+  return list
     .map((c) => ({ ...c, _s: score(c) + (c.lang === lang ? 0 : 0.5) }))
     .sort((a, b) => a._s - b._s || (b.image ? 1 : 0) - (a.image ? 1 : 0) || a.name.localeCompare(b.name, 'de'))
     .slice(0, 250);

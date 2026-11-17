@@ -85,8 +85,23 @@ async function loadSettings() {
     };
   }
   setApiBase(settings.apiBase);
+  applyTheme();
 }
 const saveSettings = () => kvSet('settings', settings);
+
+// ---------- Darstellung ----------
+function applyTheme() {
+  const t = settings.theme || 'light';
+  const dark = t === 'dark' || (t === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  const m = document.querySelector('meta[name="theme-color"]');
+  if (m) m.content = dark ? '#000000' : '#ffffff';
+  const cs = document.querySelector('meta[name="color-scheme"]');
+  if (cs) cs.content = dark ? 'dark' : 'light';
+}
+// Zoomen per Zwei-Finger-Geste verhindern (iOS ignoriert user-scalable=no teilweise)
+document.addEventListener('gesturestart', (e) => e.preventDefault());
+document.addEventListener('touchmove', (e) => { if (e.scale !== undefined && e.scale !== 1) e.preventDefault(); }, { passive: false });
 
 // ---------- Navigation ----------
 const scroller = $('main');
@@ -950,7 +965,12 @@ function renderMarket() {
     ? `<table><tr><th>TCGplayer je Zustand (echt)</th><th>Preis</th></tr>${Object.entries(ppt.conditions).map(([n, v]) => `<tr class="${n === CM_TO_TCG[cur.myCond] ? 'hl' : ''}"><td>${n}</td><td>${eur(v.usd * fx.rate)}</td></tr>`).join('')}</table>
        <p class="date">Variante ${esc(tpVariant(ppt.printing || ''))} · Pokemon Price Tracker · abgerufen am ${dt(cur.gradedApi.fetchedAt)}${cur.gradedApi.fromCache ? ' (zwischengespeichert)' : ''}</p>`
     : (settings.pptKey ? '<p class="date" id="ppt-status"></p>' : '');
-  el.innerHTML = tabs + note + kombHtml + cmHtml + condTable + tpHtml;
+  const enN = cur.enName?.name || cur.card.name;
+  const quick = `<div class="quick-links">
+      <a class="btn small" target="_blank" rel="noopener" href="https://www.cardmarket.com/de/Pokemon/Products/Search?category=-1&searchString=${encodeURIComponent(enN)}">Cardmarket öffnen ↗</a>
+      <a class="btn small" target="_blank" rel="noopener" href="https://www.ebay.de/sch/i.html?_nkw=${encodeURIComponent(cur.ebayQuery)}&LH_Sold=1&LH_Complete=1&_sop=13">eBay verkauft ↗</a>
+    </div>`;
+  el.innerHTML = tabs + note + kombHtml + quick + cmHtml + condTable + tpHtml;
   $$('.cond-seg button', el).forEach((b) =>
     b.addEventListener('click', () => {
       cur.myCond = b.dataset.z;
@@ -1494,6 +1514,12 @@ function renderSettings() {
       <label class="row" style="margin-top:10px"><span>Netto-Minimum €</span><input id="set-min" inputmode="decimal" value="${n2(settings.minNetto)}" /></label>
     </div>
     <div class="card">
+      <h2>Darstellung</h2>
+      <div class="seg" id="set-theme">
+        ${[['light', 'Hell'], ['dark', 'Dunkel'], ['system', 'Wie System']].map(([k, l]) => `<button data-t="${k}" class="${(settings.theme || 'light') === k ? 'on' : ''}">${l}</button>`).join('')}
+      </div>
+    </div>
+    <div class="card">
       <h2>Graded-Preise (Pokemon Price Tracker)</h2>
       <label>API-Schlüssel<input id="set-ppt" type="password" autocomplete="off" placeholder="pokeprice_…" value="${esc(settings.pptKey || '')}" /></label>
       <p class="hint">Kostenlos: 100 Credits pro Tag. Schlüssel holen unter <a href="https://www.pokemonpricetracker.com/api" target="_blank" rel="noopener">pokemonpricetracker.com/api</a>. Er bleibt auf diesem Gerät und geht nur über deinen eigenen Cloudflare-Worker an Pokemon Price Tracker.</p>
@@ -1548,6 +1574,12 @@ function renderSettings() {
     else p.versand = v;
   }));
   onNum($('#set-min'), (v) => (settings.minNetto = v));
+  $$('#set-theme button').forEach((b) => b.addEventListener('click', () => {
+    settings.theme = b.dataset.t;
+    saveSettings();
+    applyTheme();
+    $$('#set-theme button').forEach((x) => x.classList.toggle('on', x === b));
+  }));
   $('#set-ppt').addEventListener('change', (e) => {
     settings.pptKey = e.target.value.trim();
     saveSettings();
