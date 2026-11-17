@@ -9,6 +9,7 @@ import {
 import { db, kvGet, kvSet } from './db.js';
 import { createGrading, shareReport } from './grading.js';
 import { createScanner } from './scanner.js';
+import { kalkulation, verkaufsErgebnis, portfolio } from './flip.js';
 
 // ---------- Helfer ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -666,11 +667,12 @@ function renderEval() {
     </div>
 
     <div class="card">
-      <h2>Zum Bestand hinzufügen</h2>
+      <h2>Zur Sammlung hinzufügen</h2>
       <div class="grid2">
         <label>Einkaufspreis €<input id="inv-buy" inputmode="decimal" placeholder="z. B. 20" /></label>
         <label>Datum<input id="inv-date" type="date" value="${today()}" /></label>
       </div>
+      <p class="hint" id="inv-pott"></p>
       <label class="row"><span>Status</span>
         <select id="inv-status"><option value="bestand">im Bestand</option><option value="beobachtet">beobachtet</option><option value="verkauft">verkauft</option></select>
       </label>
@@ -741,6 +743,18 @@ function renderEval() {
     }
   });
   $('#inv-save').addEventListener('click', saveToInventory);
+  const pottHint = () => {
+    const el = $('#inv-pott');
+    if (!el) return;
+    const cfg = flipCfg();
+    const pf = portfolio(inventory, { start: cfg.start, marktwert: (it) => itemValue(it).value, platform: itemPlatform });
+    const buy = parseNum($('#inv-buy').value) || 0;
+    el.innerHTML = cfg.start > 0 || inventory.length
+      ? `Im Pott: <b>${eur(pf.kasse)}</b>${buy ? ` · nach diesem Kauf: <b class="${pf.kasse - buy < 0 ? 'neg' : ''}">${eur(pf.kasse - buy)}</b>` : ''}`
+      : 'Tipp: Unter „Sammlung“ ein Startkapital eintragen, dann rechnet die App deinen Pott mit.';
+  };
+  $('#inv-buy').addEventListener('input', pottHint);
+  pottHint();
 
   renderMarket();
   renderLinks();
@@ -1144,7 +1158,7 @@ async function saveToInventory() {
   };
   await db.put('inventory', item);
   inventory = await db.all('inventory');
-  toast('Im Bestand gespeichert');
+  toast('Zur Sammlung hinzugefügt');
 }
 
 // ---------- Bestand ----------
@@ -1175,86 +1189,151 @@ function itemValue(it) {
 }
 
 let invFilter = 'all';
+const flipCfg = () => ({ start: 0, undercut: 0.05, marge: 0.2, ...(settings.flip || {}) });
+const itemPlatform = (it) => settings.platforms[it.vkPlattform] || settings.platforms[settings.platform] || settings.platforms.cardmarket;
+
 function renderInventory() {
   const el = $('#inv');
+  const cfg = flipCfg();
   const items = inventory.slice().sort((a, b) => b.createdAt - a.createdAt);
-  let sumBuy = 0, sumVal = 0, realized = 0, missing = 0;
-  for (const it of items) {
-    if (it.status === 'bestand') {
-      sumBuy += it.einkauf || 0;
-      const v = itemValue(it).value;
-      if (v == null) missing++;
-      else sumVal += v;
-    }
-    if (it.status === 'verkauft' && it.verkauf != null) realized += it.verkauf - (it.einkauf || 0);
-  }
-  const unreal = sumVal - sumBuy;
+  const pf = portfolio(items, { start: cfg.start, marktwert: (it) => itemValue(it).value, platform: itemPlatform, erloes: (it) => itemCalc(it).netto });
   const shown = items.filter((it) => invFilter === 'all' || it.status === invFilter);
+  const counts = { all: items.length, bestand: 0, verkauft: 0, beobachtet: 0 };
+  for (const it of items) counts[it.status] = (counts[it.status] || 0) + 1;
+  const cls = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : '');
+  const sign = (v) => (v > 0 ? '+' : '');
   const lastSync = refreshState.last;
   el.innerHTML = `
     <div class="card">
       <div class="hero">
-        <div class="lbl">Marktwert Bestand</div>
-        <div class="val">${eur(sumVal)}</div>
-        <div class="sub"><b class="${unreal >= 0 ? 'pos' : 'neg'}">${unreal >= 0 ? '+' : ''}${eur(unreal)}</b>${sumBuy > 0 ? ` <span class="${unreal >= 0 ? 'pos' : 'neg'}">(${unreal >= 0 ? '+' : ''}${pct(unreal / sumBuy)})</span>` : ''} unrealisiert</div>
+        <div class="lbl">Kasse · verfügbar für Einkäufe</div>
+        <div class="val ${pf.kasse < 0 ? 'neg' : ''}">${eur(pf.kasse)}</div>
+        <div class="sub">Gesamtvermögen <b>${eur(pf.gesamt)}</b>${pf.rendite != null ? ` · <b class="${cls(pf.rendite)}">${sign(pf.rendite)}${pct(pf.rendite)}</b> seit Start` : ''}</div>
       </div>
+      ${pf.kasse < 0 ? '<div class="warn">Du hast mehr eingekauft, als im Pott war. Startkapital erhöhen oder erst verkaufen.</div>' : ''}
       <div class="sum">
-        <div><span>Summe Einkauf</span><b>${eur(sumBuy)}</b></div>
-        <div><span>Marktwert nach Faktoren</span><b>${eur(sumVal)}</b></div>
-        <div><span>Unrealisierter Gewinn</span><b class="${unreal > 0 ? 'pos' : unreal < 0 ? 'neg' : ''}">${eur(unreal)}</b></div>
-        <div><span>Realisiert (verkauft)</span><b class="${realized > 0 ? 'pos' : realized < 0 ? 'neg' : ''}">${eur(realized)}</b></div>
+        <div><span>Startkapital (Pott)</span><b>${eur(pf.start)}</b></div>
+        <div><span>Gebunden in Karten (Einkauf)</span><b>${eur(pf.gebunden)}</b></div>
+        <div><span>Lagerwert, realistisch verkauft</span><b>${eur(pf.lagerwert)}</b></div>
+        <div><span>Unrealisiert</span><b class="${cls(pf.lagerwert - pf.gebunden)}">${sign(pf.lagerwert - pf.gebunden)}${eur(pf.lagerwert - pf.gebunden)}</b></div>
+        <div><span>Deckungsbeitrag realisiert</span><b class="${cls(pf.dbSumme)}">${sign(pf.dbSumme)}${eur(pf.dbSumme)}</b></div>
+        <div><span>Umsatz · ${pf.anzahlVerkauft} ${pf.anzahlVerkauft === 1 ? 'Verkauf' : 'Verkäufe'}</span><b>${eur(pf.umsatz)}</b></div>
+        <div><span>Ø Deckungsbeitrag je Verkauf</span><b class="${cls(pf.dbSchnitt)}">${pf.dbSchnitt != null ? sign(pf.dbSchnitt) + eur(pf.dbSchnitt) : '–'}</b></div>
+        <div><span>Ø Rendite · Ø Haltedauer</span><b>${pf.roiSchnitt != null ? pct(pf.roiSchnitt) : '–'} · ${pf.halteSchnitt != null ? Math.round(pf.halteSchnitt) + ' Tage' : '–'}</b></div>
       </div>
-      ${missing ? `<p class="hint">${missing} Karte(n) ohne Preis sind nicht enthalten.</p>` : ''}
-      <p class="date">Letzter Preisabgleich: ${lastSync ? dt(lastSync) : 'noch nie'}. Preise älter als 24 h werden automatisch aktualisiert, sobald die App geöffnet ist.</p>
-      <div class="grid2" style="margin-top:8px">
+      ${pf.lagerOhnePreis ? `<p class="hint">${pf.lagerOhnePreis} Karte(n) ohne Marktpreis sind im Lagerwert nicht enthalten.</p>` : ''}
+      <details class="more">
+        <summary>Pott und Kalkulation einstellen</summary>
+        <div class="grid2" style="margin-top:8px">
+          <label>Startkapital €<input id="flip-start" inputmode="decimal" value="${n2(cfg.start)}" /></label>
+          <label>Unter Markt anbieten %<input id="flip-under" inputmode="decimal" value="${fmt1(cfg.undercut * 100)}" /></label>
+          <label>Wunschmarge auf Einkauf %<input id="flip-marge" inputmode="decimal" value="${fmt1(cfg.marge * 100)}" /></label>
+        </div>
+        <p class="hint">Kasse = Startkapital − alle Einkäufe + Verkaufserlöse nach Gebühr und Versand. Lagerwert = was beim Verkauf zum Angebotspreis nach Gebühr und Versand übrig bliebe. Angebotspreis = Marktwert deiner Karte minus „unter Markt“, damit sie zügig verkauft wird.</p>
+      </details>
+      <div class="grid2" style="margin-top:10px">
+        <button id="inv-add" class="primary">Karte hinzufügen</button>
         <button id="inv-refresh">Preise aktualisieren</button>
-        <button id="inv-csv">CSV-Export</button>
       </div>
+      <button id="inv-csv" class="block ghost">CSV-Export</button>
+      <p class="date">Letzter Preisabgleich: ${lastSync ? dt(lastSync) : 'noch nie'}. Preise älter als 24 h werden automatisch aktualisiert, solange die App offen ist.</p>
     </div>
     <div class="seg" id="inv-filter">
-      ${[['all', 'Alle'], ['bestand', 'Bestand'], ['beobachtet', 'Beobachtet'], ['verkauft', 'Verkauft']].map(([k, l]) => `<button data-f="${k}" class="${invFilter === k ? 'on' : ''}">${l}</button>`).join('')}
+      ${[['all', 'Alle'], ['bestand', 'Im Bestand'], ['verkauft', 'Verkauft'], ['beobachtet', 'Beobachtet']].map(([k, l]) => `<button data-f="${k}" class="${invFilter === k ? 'on' : ''}">${l} <span class="meta">${counts[k] || 0}</span></button>`).join('')}
     </div>
     <div class="card">
-      ${shown.length ? shown.map(invItemHtml).join('') : '<p class="empty">Keine Karten.</p>'}
+      ${shown.length ? shown.map(invItemHtml).join('') : '<p class="empty">Noch keine Karten. „Karte hinzufügen“ öffnet die Suche; in der Bewertung unten „Zur Sammlung hinzufügen“.</p>'}
     </div>`;
+  const numIn = (sel, apply) => $(sel).addEventListener('change', (e) => {
+    const v = parseNum(e.target.value);
+    if (v == null || v < 0) return toast('Ungültige Zahl');
+    settings.flip = { ...flipCfg() };
+    apply(v);
+    saveSettings();
+    renderInventory();
+  });
+  numIn('#flip-start', (v) => (settings.flip.start = v));
+  numIn('#flip-under', (v) => (settings.flip.undercut = Math.min(v, 90) / 100));
+  numIn('#flip-marge', (v) => (settings.flip.marge = v / 100));
+  $('#inv-add').addEventListener('click', () => show('search'));
   $('#inv-refresh').addEventListener('click', () => refreshPrices(true));
   $('#inv-csv').addEventListener('click', exportCsv);
   $$('#inv-filter button').forEach((b) => b.addEventListener('click', () => { invFilter = b.dataset.f; renderInventory(); }));
   $$('.inv-item', el).forEach(bindInvItem);
+  if (openItemUid) {
+    const d = $(`.inv-item[data-uid="${openItemUid}"] details`, el);
+    if (d) { d.open = true; d.scrollIntoView({ block: 'center' }); }
+    openItemUid = null;
+  }
+}
+let openItemUid = null;
+
+function itemCalc(it) {
+  const cfg = flipCfg();
+  const p = itemPlatform(it);
+  return kalkulation({ einkauf: it.einkauf, markt: itemValue(it).value, provision: p.provision, versand: p.versand, undercut: cfg.undercut, marge: cfg.marge });
 }
 
 function invItemHtml(it) {
   const v = itemValue(it);
+  const p = itemPlatform(it);
   const statusLbl = { bestand: 'im Bestand', beobachtet: 'beobachtet', verkauft: 'verkauft' }[it.status];
+  const cls = (x) => (x > 0 ? 'pos' : x < 0 ? 'neg' : '');
+  const sign = (x) => (x > 0 ? '+' : '');
+  let right = '', calc = '';
+  if (it.status === 'verkauft' && Number.isFinite(it.verkauf)) {
+    const r = verkaufsErgebnis({ verkauf: it.verkauf, provision: p.provision, versand: Number.isFinite(it.vkVersand) ? it.vkVersand : p.versand, einkauf: it.einkauf });
+    const days = it.vkDatum && it.datum ? Math.max(0, Math.round((new Date(it.vkDatum) - new Date(it.datum)) / 86400000)) : null;
+    right = `<span class="meta">Deckungsbeitrag</span><b class="${cls(r.db)}">${sign(r.db)}${eur(r.db)}</b>${r.roi != null ? `<span class="meta ${cls(r.db)}">${sign(r.roi)}${pct(r.roi)}</span>` : ''}`;
+    calc = `<div class="meta">Verkauft für <b>${eur(it.verkauf)}</b> über ${esc(p.label)}${it.vkDatum ? ' am ' + new Date(it.vkDatum).toLocaleDateString('de-DE') : ''} · netto ${eur(r.netto)}${days != null ? ` · ${days} Tage gehalten` : ''}</div>`;
+  } else if (it.status === 'bestand') {
+    const k = itemCalc(it);
+    right = k.angebot != null
+      ? `<span class="meta">Anbieten für</span><b>${eur(k.angebot)}</b><span class="meta ${cls(k.db)}">DB ${sign(k.db)}${eur(k.db)}</span>`
+      : `<span class="meta">kein Marktpreis</span>`;
+    calc = `<div class="calc-chips">
+        <span>Einkauf <b>${eur(it.einkauf)}</b></span>
+        <span>Markt <b>${eur(v.value)}</b></span>
+        <span>Mindestpreis <b>${eur(k.breakEven)}</b></span>
+        <span>Ziel ${fmt1(flipCfg().marge * 100)} % <b>${eur(k.zielpreis)}</b></span>
+      </div>
+      ${k.verlust ? `<div class="warn">Der Markt (${eur(v.value)}) liegt unter deinem Mindestpreis von ${eur(k.breakEven)}. Verkauf zum Marktpreis wäre ein Verlust.</div>`
+        : k.unterZiel ? `<p class="date">Zum Marktpreis verkaufbar, aber unter deiner Wunschmarge.</p>` : ''}`;
+  } else {
+    right = `<span class="meta">Marktwert</span><b>${eur(v.value)}</b>`;
+  }
   return `
   <div class="inv-item" data-uid="${it.uid}">
     ${img(it.image, 'low', it.name)}
     <div>
       <div class="n">${esc(it.name)}</div>
       <div class="meta">${esc(it.setName)} · Nr. ${esc(it.localId)}${it.official ? '/' + it.official : ''} · ${esc(LANG_LABELS[it.sprache] || it.sprache)} · ${esc(it.zustand)}</div>
-      <div class="meta"><span class="tag">${statusLbl}</span> Einkauf ${eur(it.einkauf)} · ${esc(it.datum)}${it.status === 'verkauft' ? ` · Verkauf ${eur(it.verkauf)}` : ''}</div>
+      <div class="meta"><span class="tag">${statusLbl}</span> gekauft ${it.datum ? new Date(it.datum).toLocaleDateString('de-DE') : '–'}${it.grading ? ` <span class="grade-badge">PSA ~${it.grading.overall}</span>` : ''}</div>
+      ${calc}
       ${v.ref != null ? `<div class="date">${esc(v.src)}: ${eur(v.ref)} · Stand ${dt(v.date)}</div>` : '<div class="date">Kein Marktpreis vorhanden</div>'}
-      <div class="date">Preise abgerufen am ${dt(it.fetchedAt)}</div>
-      ${it.grading ? `<div class="meta"><span class="grade-badge">PSA ~${it.grading.overall} geschätzt</span></div>` : ''}
       ${it.notiz ? `<div class="meta">${esc(it.notiz)}</div>` : ''}
     </div>
-    <div class="right">
-      <b>${eur(v.value)}</b>
-      ${v.value != null && it.einkauf != null && it.status !== 'verkauft' ? `<span class="meta ${v.value - it.einkauf >= 0 ? 'pos' : 'neg'}">${v.value - it.einkauf >= 0 ? '+' : ''}${eur(v.value - it.einkauf)}</span>` : ''}
-    </div>
+    <div class="right">${right}</div>
+    ${it.status === 'bestand' ? `<div class="item-actions"><button class="small" data-act="sold">Verkauft</button><button class="small ghost" data-act="open">Neu bewerten</button></div>` : ''}
     <details>
       <summary>Bearbeiten</summary>
       <div class="grid2">
         <label>Status<select data-k="status">
           <option value="bestand" ${it.status === 'bestand' ? 'selected' : ''}>im Bestand</option>
-          <option value="beobachtet" ${it.status === 'beobachtet' ? 'selected' : ''}>beobachtet</option>
           <option value="verkauft" ${it.status === 'verkauft' ? 'selected' : ''}>verkauft</option>
+          <option value="beobachtet" ${it.status === 'beobachtet' ? 'selected' : ''}>beobachtet</option>
         </select></label>
         <label>Zustand<select data-k="zustand">${Object.keys(settings.cf).map((k) => `<option ${k === it.zustand ? 'selected' : ''}>${k}</option>`).join('')}</select></label>
         <label>Einkauf €<input data-k="einkauf" inputmode="decimal" value="${it.einkauf ?? ''}" /></label>
-        <label>Verkauf €<input data-k="verkauf" inputmode="decimal" value="${it.verkauf ?? ''}" /></label>
-        <label>Datum<input data-k="datum" type="date" value="${esc(it.datum)}" /></label>
+        <label>Kaufdatum<input data-k="datum" type="date" value="${esc(it.datum)}" /></label>
         <label>Sprache<select data-k="sprache">${Object.keys(settings.lf).map((k) => `<option value="${k}" ${k === it.sprache ? 'selected' : ''}>${LANG_LABELS[k] || k}</option>`).join('')}</select></label>
+        <label>Verkauf über<select data-k="vkPlattform">${Object.entries(settings.platforms).map(([k, x]) => `<option value="${k}" ${k === (it.vkPlattform || settings.platform) ? 'selected' : ''}>${esc(x.label)}</option>`).join('')}</select></label>
+      </div>
+      <h3>Verkauf</h3>
+      <div class="grid2">
+        <label>Verkaufspreis €<input data-k="verkauf" inputmode="decimal" value="${it.verkauf ?? ''}" /></label>
+        <label>Verkaufsdatum<input data-k="vkDatum" type="date" value="${esc(it.vkDatum || '')}" /></label>
+        <label>Versand tatsächlich €<input data-k="vkVersand" inputmode="decimal" placeholder="${n2(p.versand)}" value="${it.vkVersand ?? ''}" /></label>
       </div>
       <label>Notiz<input data-k="notiz" value="${esc(it.notiz)}" /></label>
       ${it.grading ? gradingDocHtml(it.grading) : ''}
@@ -1290,24 +1369,47 @@ function bindInvItem(row) {
   $$('[data-k]', row).forEach((inp) =>
     inp.addEventListener('change', async () => {
       const k = inp.dataset.k;
-      it[k] = ['einkauf', 'verkauf'].includes(k) ? parseNum(inp.value) : inp.value;
+      it[k] = ['einkauf', 'verkauf', 'vkVersand'].includes(k) ? parseNum(inp.value) : inp.value;
+      if (k === 'verkauf' && it[k] != null && it.status !== 'verkauft') {
+        it.status = 'verkauft';
+        it.vkDatum = it.vkDatum || today();
+      }
       await db.put('inventory', it);
+      openItemUid = it.uid;
       renderInventory();
     }),
   );
+  const sold = $('[data-act=sold]', row);
+  if (sold) sold.addEventListener('click', async () => {
+    const k = itemCalc(it);
+    const p = itemPlatform(it);
+    const input = prompt(`Verkaufspreis in € (${p.label})`, k.angebot != null ? String(k.angebot).replace('.', ',') : '');
+    if (input == null) return;
+    const v = parseNum(input);
+    if (v == null || v <= 0) return toast('Ungültiger Preis');
+    it.status = 'verkauft';
+    it.verkauf = v;
+    it.vkDatum = today();
+    it.vkPlattform = it.vkPlattform || settings.platform;
+    await db.put('inventory', it);
+    const r = verkaufsErgebnis({ verkauf: v, provision: p.provision, versand: p.versand, einkauf: it.einkauf });
+    toast(`Verkauft – Deckungsbeitrag ${r.db >= 0 ? '+' : ''}${eur(r.db)}`);
+    renderInventory();
+  });
   $('[data-act=del]', row).addEventListener('click', async () => {
     if (!confirm(`„${it.name}“ löschen?`)) return;
     await db.del('inventory', it.uid);
     inventory = inventory.filter((x) => x.uid !== it.uid);
     renderInventory();
   });
-  $('[data-act=open]', row).addEventListener('click', () => openCard(it.lang, it.id));
+  $$('[data-act=open]', row).forEach((b) => b.addEventListener('click', () => openCard(it.lang, it.id)));
   const rep = $('[data-act=report]', row);
   if (rep) rep.addEventListener('click', () => shareReport({ name: it.name, sub: `${it.setName} · Nr. ${it.localId}${it.official ? '/' + it.official : ''}` }, it.grading, toast));
 }
 
 function exportCsv() {
-  const cols = ['tcgdex_id', 'name', 'set', 'nummer', 'sprache', 'zustand', 'status', 'einkauf_eur', 'datum', 'verkauf_eur', 'marktwert_eur', 'referenz_eur', 'referenz_quelle', 'preisstand', 'abgerufen', 'notiz', 'bild'];
+  const cols = ['tcgdex_id', 'name', 'set', 'nummer', 'sprache', 'zustand', 'status', 'einkauf_eur', 'kaufdatum', 'marktwert_eur', 'angebotspreis_eur', 'mindestpreis_eur', 'zielpreis_eur',
+    'verkauf_eur', 'verkaufsdatum', 'plattform', 'netto_erloes_eur', 'deckungsbeitrag_eur', 'rendite_prozent', 'preisquelle', 'preisstand', 'notiz'];
   const q = (v) => {
     const s = v == null ? '' : String(v);
     return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -1316,13 +1418,18 @@ function exportCsv() {
   const iso = (v) => (v ? new Date(v).toISOString() : '');
   const rows = inventory.map((it) => {
     const v = itemValue(it);
+    const p = itemPlatform(it);
+    const k = itemCalc(it);
+    const r = it.status === 'verkauft' && Number.isFinite(it.verkauf) ? verkaufsErgebnis({ verkauf: it.verkauf, provision: p.provision, versand: Number.isFinite(it.vkVersand) ? it.vkVersand : p.versand, einkauf: it.einkauf }) : null;
     return [it.id, it.name, it.setName, `${it.localId}${it.official ? '/' + it.official : ''}`, it.sprache, it.zustand, it.status,
-      num(it.einkauf), it.datum, num(it.verkauf), num(v.value), num(v.ref), v.src || '', iso(v.date), iso(it.fetchedAt), it.notiz, it.image ? it.image + '/high.webp' : ''];
+      num(it.einkauf), it.datum, num(v.value), num(k.angebot), num(k.breakEven), num(k.zielpreis),
+      num(it.verkauf), it.vkDatum || '', it.status === 'verkauft' ? p.label : '', num(r?.netto), num(r?.db), r?.roi != null ? (r.roi * 100).toFixed(1).replace('.', ',') : '',
+      v.src || '', iso(v.date), it.notiz];
   });
   const csv = '﻿' + [cols, ...rows].map((r) => r.map(q).join(';')).join('\r\n');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
-  a.download = `bestand-${today()}.csv`;
+  a.download = `sammlung-${today()}.csv`;
   document.body.appendChild(a);
   a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);

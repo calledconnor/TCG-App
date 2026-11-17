@@ -79,6 +79,14 @@ Zustandsabschlag: Gibt es echte TCGplayer-Zustandspreise (Near Mint, Lightly/Mod
 
 TCGdex/Cardmarket-Preisindex hat **keine** getrennten Preise pro Zustand. Die Bewertung zeigt deshalb eine Tabelle MT … PO, abgeleitet aus der Referenz über `CF[Zustand] / CF[Referenzzustand]` × Sprachfaktor, mit Marktwert, Netto und Max. Gebot 80 %. Echte Angebote eines bestimmten Zustands (Cardmarket-Filter „Zustand“) trägst du unter „Angebote“ ein und stellst „Zustand der Referenz“ entsprechend ein.
 
+## Sammlung, Kasse und Flip-Kalkulation
+
+Reiter „Sammlung“ (früher Bestand):
+- **Kasse (Pott):** Startkapital − alle Einkäufe + Verkaufserlöse nach Gebühr und Versand. Dazu gebundenes Kapital, realistischer Lagerwert (Netto-Erlös beim Verkauf zum Angebotspreis), unrealisierter und realisierter Deckungsbeitrag, Umsatz, Ø DB, Ø Rendite, Ø Haltedauer, Gesamtvermögen und Rendite seit Start. Warnung, wenn mehr eingekauft wurde als im Pott war. Beim Hinzufügen einer Karte zeigt die Bewertung, wie viel nach dem Kauf noch im Pott ist.
+- **Preiskalkulation je Karte:** Angebotspreis = Marktwert deiner Karte × (1 − „unter Markt“, Standard 5 %), abgerundet auf ,x9; Mindestpreis = (Einkauf + Versand) ÷ (1 − Provision); Zielpreis = (Einkauf × (1 + Wunschmarge, Standard 20 %) + Versand) ÷ (1 − Provision); erwarteter Deckungsbeitrag. Warnung, wenn der Markt unter dem Mindestpreis liegt.
+- **Verkäufe:** Knopf „Verkauft“ (Preis vorbelegt mit Angebotspreis) oder Felder Verkaufspreis, Datum, Plattform, tatsächlicher Versand. Ergebnis: Netto-Erlös, Deckungsbeitrag, Rendite, Haltedauer.
+- CSV-Export mit allen Kalkulations- und Verkaufsspalten.
+
 ## Bestand
 
 Speichert Bild-URL, TCGdex-ID, Name, Set, Sprache, Zustand, Einkauf, Datum, Status, Verkauf, Notiz sowie den Preis-Snapshot mit Abrufdatum. Marktwert = Cardmarket-Feld (Standard `trend`) × Faktoren. Preise älter als 24 h werden beim Öffnen der App und alle 30 Minuten, solange sie offen ist, nachgeladen. Echte Hintergrund-Aktualisierung bei geschlossener App erlauben Browser für Web-Apps nicht zuverlässig. CSV-Export (Semikolon, Dezimalkomma, UTF-8 mit BOM für Excel) und JSON-Backup.
