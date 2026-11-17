@@ -7,7 +7,7 @@ import {
   getCard, extractPricing, englishName, setIdOf, getSets, usdEur, searchSmart, gradedPrices,
 } from './api.js';
 import { db, kvGet, kvSet } from './db.js';
-import { createGrading, shareReport } from './grading.js';
+import { createGrading, shareReport, checklistLines } from './grading.js';
 import { createScanner } from './scanner.js';
 import { kalkulation, verkaufsErgebnis, portfolio } from './flip.js';
 
@@ -114,6 +114,7 @@ function show(view, { push = true, keepScroll = true } = {}) {
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + view));
   $$('.tabbar button').forEach((b) => b.classList.toggle('on', b.dataset.view === view));
   if (view === 'inv') renderInventory();
+  if (view === 'cart') renderCart();
   if (view === 'settings') renderSettings();
   if (view === 'grade') grading && grading.refresh();
   if (view === 'eval' && cur && $('#graded-api')) renderGradedApi();
@@ -1129,10 +1130,12 @@ function updateCalc() {
         .map((z) => `<tr data-cond="${z.zustand}" class="${z.zustand === cur.myCond ? 'hl' : ''}"><td>${z.zustand} <span class="meta">${CONDITION_LABELS[z.zustand] || ''}</span></td><td>${eur(z.brutto)}</td><td>${eur(z.netto)}</td><td>${eur(z.maxGebot80)}</td></tr>`).join('')}
     </table>
     <p class="date">Abgeleitet vom Ausgangspreis (${cur.refCond}) über ${ecf.fromMarket ? 'die echten Zustandspreise dieser Karte bei TCGplayer' : 'deine Zustandsfaktoren'}. Zeile antippen, um den Zustand deiner Karte zu wählen.</p>
+    <button class="block primary" id="to-cart">In den Ankaufskorb · ${eur(l80.maxGebot)}</button>
     ${r.netto <= 0 ? '<div class="warn">Netto ist null oder negativ. Bei diesen Kosten lohnt sich kein Ankauf.</div>' : ''}
     ${r.unterMindest ? `<div class="warn">Netto unter ${eur(settings.minNetto)}: Der Flip trägt sich einzeln nicht, er lohnt sich nur im Sammelversand.</div>` : ''}`;
   const buy = $('#inv-buy');
   if (buy && !buy.value) buy.placeholder = `z. B. ${n2(r.ladder[1].maxGebot)} (80 %)`;
+  $('#to-cart').addEventListener('click', () => addToCart(ref, r, l80));
   $$('.cond-table tr[data-cond]', out).forEach((tr) =>
     tr.addEventListener('click', () => {
       cur.myCond = tr.dataset.cond;
@@ -1179,6 +1182,147 @@ async function saveToInventory() {
   await db.put('inventory', item);
   inventory = await db.all('inventory');
   toast('Zur Sammlung hinzugefügt');
+}
+
+// ---------- Ankaufskorb ----------
+let cart = [];
+let cartRabatt = null; // null = Vorschlag nach Stückzahl
+const rabattVorschlag = (n) => (n >= 20 ? 0.15 : n >= 10 ? 0.1 : n >= 5 ? 0.05 : 0);
+const saveCart = () => kvSet('cart', { items: cart, rabatt: cartRabatt });
+async function loadCart() {
+  const c = await kvGet('cart', null);
+  if (c) { cart = c.items || []; cartRabatt = c.rabatt ?? null; }
+  updateCartBtn();
+}
+function cartTotals() {
+  const rab = cartRabatt ?? rabattVorschlag(cart.length);
+  const t = { n: cart.length, markt: 0, netto: 0, max80: 0, angebot: 0, rab };
+  for (const it of cart) { t.markt += it.markt || 0; t.netto += it.netto || 0; t.max80 += it.max80 || 0; t.angebot += it.angebot || 0; }
+  t.gesamt = t.angebot * (1 - rab);
+  t.gewinn = t.netto - t.gesamt;
+  t.rendite = t.gesamt > 0 ? t.gewinn / t.gesamt : null;
+  return t;
+}
+function updateCartBtn() {
+  const b = $('#cart-btn');
+  if (!b) return;
+  b.classList.toggle('hidden', !cart.length);
+  if (cart.length) b.textContent = `Korb ${cart.length} · ${eur(cartTotals().gesamt)}`;
+}
+$('#cart-btn').addEventListener('click', () => show('cart'));
+
+function addToCart(ref, r, l80) {
+  const c = cur.card;
+  const existing = cart.find((x) => x.cardId === c.id && x.zustand === cur.myCond && x.sprache === cur.myLang);
+  const item = {
+    uid: existing?.uid || uid(), cardId: c.id, lang: cur.lang, name: c.name, setName: c.set?.name || '', localId: c.localId,
+    official: c.set?.cardCount?.official ?? null, image: c.image || null, zustand: cur.myCond, sprache: cur.myLang,
+    markt: r.brutto, netto: r.netto, max80: l80.maxGebot, angebot: existing?.angebot ?? Math.floor(l80.maxGebot * 2) / 2,
+    refLabel: ref.label, refDate: ref.date, pricing: cur.pricing,
+    gradedApi: cur.gradedApi && cur.gradedApi.status === 'ok' ? { data: cur.gradedApi.data, fetchedAt: cur.gradedApi.fetchedAt } : null,
+    grading: cur.grading || null, addedAt: Date.now(),
+  };
+  if (existing) Object.assign(existing, item);
+  else cart.push(item);
+  saveCart();
+  updateCartBtn();
+  toast(existing ? 'Im Korb aktualisiert' : `In den Korb gelegt (${cart.length})`);
+}
+
+function renderCart() {
+  const el = $('#cart');
+  const t = cartTotals();
+  const cfg = flipCfg();
+  const pf = portfolio(inventory, { start: cfg.start, marktwert: (it) => itemValue(it).value, platform: itemPlatform, erloes: (it) => itemCalc(it).netto });
+  const cls = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : '');
+  if (!cart.length) {
+    el.innerHTML = '<p class="empty">Der Korb ist leer. In der Bewertung „In den Ankaufskorb“ antippen.</p>';
+    return;
+  }
+  const vors = rabattVorschlag(cart.length);
+  el.innerHTML = `
+    <div class="card">
+      <div class="hero">
+        <div class="lbl">Gesamtangebot für ${t.n} Karte${t.n > 1 ? 'n' : ''}</div>
+        <div class="val">${eur(t.gesamt)}</div>
+        <div class="sub">Erwarteter Gewinn <b class="${cls(t.gewinn)}">${eur(t.gewinn)}</b>${t.rendite != null ? ` · Rendite <b>${pct(t.rendite)}</b>` : ''}</div>
+      </div>
+      <h3>Mengenrabatt vom Verkäufer</h3>
+      <div class="seg rabatt-seg">${[0, 0.05, 0.1, 0.15, 0.2].map((v) => `<button data-r="${v}" class="${Math.abs(t.rab - v) < 1e-9 ? 'on' : ''}">${v * 100} %</button>`).join('')}</div>
+      <label class="row"><span>Eigener Rabatt %</span><input id="cart-rab" inputmode="decimal" value="${fmt1(t.rab * 100)}" /></label>
+      <p class="date">Vorschlag bei ${t.n} Karten: ${fmt1(vors * 100)} % (ab 5 Karten 5 %, ab 10 Karten 10 %, ab 20 Karten 15 %).${cartRabatt != null ? ' <a href="#" id="cart-rab-auto">Vorschlag verwenden</a>' : ''}</p>
+      <div class="cart-sum">
+        <div class="line"><span>Verkaufswert aller Karten</span><b>${eur(t.markt)}</b></div>
+        <div class="line"><span>Nach Gebühren und Versand</span><b>${eur(t.netto)}</b></div>
+        <div class="line"><span>Summe Höchstgebote (80 %)</span><b>${eur(t.max80)}</b></div>
+        <div class="line"><span>Summe deiner Einzelangebote</span><b>${eur(t.angebot)}</b></div>
+        <div class="line"><span>Mengenrabatt ${fmt1(t.rab * 100)} %</span><b>− ${eur(t.angebot - t.gesamt)}</b></div>
+        <div class="line"><span><b>Gesamtangebot</b></span><b>${eur(t.gesamt)}</b></div>
+        <div class="line"><span>Pott jetzt → nach dem Kauf</span><b class="${pf.kasse - t.gesamt < 0 ? 'neg' : ''}">${eur(pf.kasse)} → ${eur(pf.kasse - t.gesamt)}</b></div>
+      </div>
+      ${t.angebot > t.max80 + 0.01 ? '<div class="warn">Deine Einzelangebote liegen über den 80-%-Höchstgeboten. Der Flip wird dünner.</div>' : ''}
+      <div class="grid2" style="margin-top:12px">
+        <button id="cart-share">Angebot teilen</button>
+        <button id="cart-buy" class="primary">Alle gekauft</button>
+      </div>
+      <button id="cart-clear" class="block ghost danger">Korb leeren</button>
+    </div>
+    <div class="card">
+      ${cart.map((it) => `
+        <div class="cart-item" data-uid="${it.uid}">
+          ${img(it.image, 'low', it.name)}
+          <div>
+            <div class="n">${esc(it.name)}</div>
+            <div class="meta">${esc(it.setName)} · ${esc(it.localId)}${it.official ? '/' + it.official : ''} · ${esc(it.zustand)} · ${esc(LANG_LABELS[it.sprache] || it.sprache)}</div>
+            <div class="meta">Wert ${eur(it.markt)} · höchstens ${eur(it.max80)}${t.rab ? ` · nach Rabatt ${eur(it.angebot * (1 - t.rab))}` : ''}</div>
+          </div>
+          <div class="right">
+            <input class="offer-in" data-off="${it.uid}" inputmode="decimal" value="${n2(it.angebot)}" aria-label="Mein Angebot" />
+            <button class="x" data-rm="${it.uid}" aria-label="entfernen">×</button>
+          </div>
+        </div>`).join('')}
+      <p class="date">Einzelangebote sind mit dem 80-%-Höchstgebot vorbelegt (auf 0,50 € abgerundet) und änderbar. Werte nach Zustand und Sprache, Stand der Bewertung.</p>
+    </div>`;
+  $$('.rabatt-seg button', el).forEach((b) => b.addEventListener('click', () => { cartRabatt = +b.dataset.r; saveCart(); renderCart(); updateCartBtn(); }));
+  $('#cart-rab').addEventListener('change', (e) => {
+    const v = parseNum(e.target.value);
+    if (v == null || v < 0 || v > 90) return toast('Rabatt zwischen 0 und 90 %');
+    cartRabatt = v / 100; saveCart(); renderCart(); updateCartBtn();
+  });
+  const auto = $('#cart-rab-auto');
+  if (auto) auto.addEventListener('click', (e) => { e.preventDefault(); cartRabatt = null; saveCart(); renderCart(); updateCartBtn(); });
+  $$('[data-off]', el).forEach((inp) => inp.addEventListener('change', () => {
+    const it = cart.find((x) => x.uid === inp.dataset.off);
+    const v = parseNum(inp.value);
+    if (v == null || v < 0) return toast('Ungültiger Preis');
+    it.angebot = v; saveCart(); renderCart(); updateCartBtn();
+  }));
+  $$('[data-rm]', el).forEach((b) => b.addEventListener('click', () => { cart = cart.filter((x) => x.uid !== b.dataset.rm); saveCart(); renderCart(); updateCartBtn(); }));
+  $('#cart-clear').addEventListener('click', () => { if (confirm('Korb leeren?')) { cart = []; cartRabatt = null; saveCart(); renderCart(); updateCartBtn(); } });
+  $('#cart-share').addEventListener('click', async () => {
+    const lines = cart.map((it) => `${it.name} (${it.setName} ${it.localId}${it.official ? '/' + it.official : ''}, ${it.zustand}): ${eur(it.angebot)}`);
+    const text = `Mein Angebot für ${t.n} Karten:\n${lines.join('\n')}\n\nSumme: ${eur(t.angebot)}${t.rab ? `\nMengenrabatt ${fmt1(t.rab * 100)} %: − ${eur(t.angebot - t.gesamt)}` : ''}\nGesamtangebot: ${eur(t.gesamt)}`;
+    try {
+      if (navigator.share) { await navigator.share({ title: 'Angebot', text }); return; }
+    } catch (e) { if (e && e.name === 'AbortError') return; }
+    try { await navigator.clipboard.writeText(text); toast('Angebot kopiert'); } catch { prompt('Angebot kopieren:', text); }
+  });
+  $('#cart-buy').addEventListener('click', async () => {
+    if (!confirm(`Alle ${t.n} Karten für zusammen ${eur(t.gesamt)} in die Sammlung übernehmen?`)) return;
+    for (const it of cart) {
+      await db.put('inventory', {
+        uid: uid(), id: it.cardId, lang: it.lang, name: it.name, setName: it.setName, setId: setIdOf({ id: it.cardId, localId: it.localId }),
+        localId: it.localId, official: it.official, image: it.image, sprache: it.sprache, zustand: it.zustand,
+        einkauf: Math.round(it.angebot * (1 - t.rab) * 100) / 100, datum: today(), status: 'bestand', verkauf: null, notiz: t.n > 1 ? `Sammelkauf (${t.n} Karten, ${fmt1(t.rab * 100)} % Rabatt)` : '',
+        refSprache: 'en', refZustand: 'NM', marketField: 'kombi', manualRef: null, pricing: it.pricing, fetchedAt: Date.now(),
+        gradedApi: it.gradedApi, grading: it.grading, offers: [], createdAt: Date.now(),
+      });
+    }
+    inventory = await db.all('inventory');
+    cart = []; cartRabatt = null; saveCart(); updateCartBtn();
+    toast(`${t.n} Karten in die Sammlung übernommen`);
+    show('inv');
+  });
 }
 
 // ---------- Bestand ----------
@@ -1379,6 +1523,8 @@ function gradingDocHtml(g) {
     <div class="meta"><span class="grade-badge">PSA ~${g.overall} geschätzt</span> ${dt(g.date)}</div>
     <div class="meta">Zentrierung max. ${g.cap} · Ecken ${fmt1(g.sub.corners)} · Kanten ${fmt1(g.sub.edges)} · Oberfläche ${fmt1(g.sub.surface)}</div>
     ${ph.front || ph.back ? `<div class="g-photos">${ph.front ? `<img src="${ph.front}" alt="vorne">` : ''}${ph.back ? `<img src="${ph.back}" alt="hinten">` : ''}</div>` : ''}
+    ${checklistLines(g.checklist).length ? `<ul class="g-list">${checklistLines(g.checklist).map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}
+    ${g.aiSummary ? `<p class="meta">KI: ${esc(g.aiSummary)}</p>` : ''}
     ${list ? `<ul class="g-list">${list}</ul>` : '<p class="hint">Keine Mängel markiert.</p>'}
     <button data-act="report" class="block">Bericht teilen</button>
   </div>`;
@@ -1520,6 +1666,11 @@ function renderSettings() {
       </div>
     </div>
     <div class="card">
+      <h2>KI-Grading (Claude)</h2>
+      <label>Anthropic-API-Schlüssel<input id="set-ai" type="password" autocomplete="off" placeholder="sk-ant-…" value="${esc(settings.aiKey || '')}" /></label>
+      <p class="hint">Für die KI-Analyse im Grading. Schlüssel unter <a href="https://platform.claude.com" target="_blank" rel="noopener">platform.claude.com</a> erstellen (kostenpflichtig, etwa 3–5 Cent pro Foto). Er bleibt auf diesem Gerät und geht nur über deinen eigenen Worker an Anthropic. Alternativ als Worker-Secret ANTHROPIC_API_KEY.</p>
+    </div>
+    <div class="card">
       <h2>Graded-Preise (Pokemon Price Tracker)</h2>
       <label>API-Schlüssel<input id="set-ppt" type="password" autocomplete="off" placeholder="pokeprice_…" value="${esc(settings.pptKey || '')}" /></label>
       <p class="hint">Kostenlos: 100 Credits pro Tag. Schlüssel holen unter <a href="https://www.pokemonpricetracker.com/api" target="_blank" rel="noopener">pokemonpricetracker.com/api</a>. Er bleibt auf diesem Gerät und geht nur über deinen eigenen Cloudflare-Worker an Pokemon Price Tracker.</p>
@@ -1580,6 +1731,11 @@ function renderSettings() {
     applyTheme();
     $$('#set-theme button').forEach((x) => x.classList.toggle('on', x === b));
   }));
+  $('#set-ai').addEventListener('change', (e) => {
+    settings.aiKey = e.target.value.trim();
+    saveSettings();
+    toast(settings.aiKey ? 'KI-Schlüssel gespeichert' : 'KI-Schlüssel entfernt');
+  });
   $('#set-ppt').addEventListener('change', (e) => {
     settings.pptKey = e.target.value.trim();
     saveSettings();
@@ -1685,6 +1841,7 @@ function initGrading() {
   grading = createGrading({
     root: $('#grade'),
     getCard: () => (cur ? cur.card : null),
+    getAiKey: () => settings.aiKey || '',
     toast,
     onApply: (res) => {
       cur.grading = res;
@@ -1703,6 +1860,7 @@ function initGrading() {
   await loadSettings();
   renderLangSelect();
   initGrading();
+  loadCart();
   try { inventory = await db.all('inventory'); } catch { inventory = []; }
   refreshState.last = await kvGet('lastRefresh', null);
   probeLanguages()

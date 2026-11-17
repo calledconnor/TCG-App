@@ -40,3 +40,17 @@ test('Homographie bildet Ecken exakt ab', async () => {
     assert.ok(Math.abs(u - dst[i][0]) < 1e-6 && Math.abs(v - dst[i][1]) < 1e-6);
   }
 });
+
+test('Checkliste: Teilnoten und Knick-Deckel', async () => {
+  const { checklistScores, defaultChecklist, checklistLines } = await import('../js/grading.js');
+  const c = defaultChecklist();
+  assert.deepEqual(checklistScores(c), { corners: 10, edges: 10, surface: 10, cap: 10 });
+  c.cornerWhitening = 2; c.edgeWhitening = 'light'; c.scratches = true; c.scratchCount = 2; c.holoDamage = 'light_scratches';
+  const s = checklistScores(c);
+  assert.equal(s.corners, 8); // 10 − 2 × 1,125 = 7,75 → 8
+  assert.equal(s.edges, 9);
+  assert.equal(s.surface, 7.5);
+  c.creases = 'crease';
+  assert.equal(checklistScores(c).cap, 4);
+  assert.ok(checklistLines(c).some((l) => l.startsWith('Kratzer: ja, 2')));
+});

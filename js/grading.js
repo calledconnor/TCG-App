@@ -215,7 +215,8 @@ export async function makeReport(meta, g) {
   const imgs = await Promise.all([load(g.annotated?.front || g.photos?.front), load(g.annotated?.back || g.photos?.back)]);
   const W = 1200, pad = 48, photoH = 640;
   const defects = g.defects || [];
-  const H = pad * 2 + 250 + (imgs.some(Boolean) ? photoH + 40 : 0) + 60 + defects.length * 40 + 60;
+  const clines = checklistLines(g.checklist);
+  const H = pad * 2 + 250 + (imgs.some(Boolean) ? photoH + 40 : 0) + 60 + defects.length * 40 + 60 + (clines.length ? 60 + clines.length * 36 : 0) + (g.aiSummary ? 80 : 0);
   const c = document.createElement('canvas');
   c.width = W; c.height = H;
   const x = c.getContext('2d');
@@ -248,6 +249,18 @@ export async function makeReport(meta, g) {
     y += photoH + 50;
   }
   x.fillStyle = '#0a0a0a'; x.font = '600 26px system-ui, sans-serif';
+  if (clines.length) {
+    x.fillStyle = '#0a0a0a'; x.font = '600 26px system-ui, sans-serif';
+    x.fillText('Zustand', pad, y); y += 42;
+    x.font = '400 22px system-ui, sans-serif';
+    for (const l of clines) { x.fillText('• ' + l, pad, y); y += 36; }
+    y += 18;
+  }
+  if (g.aiSummary) {
+    x.font = 'italic 400 20px system-ui, sans-serif'; x.fillStyle = '#3f3f46';
+    x.fillText('KI-Einschätzung: ' + g.aiSummary.slice(0, 110), pad, y); y += 60;
+  }
+  x.fillStyle = '#0a0a0a'; x.font = '600 26px system-ui, sans-serif';
   x.fillText(`Mängel (${defects.length})`, pad, y);
   y += 44;
   x.font = '400 22px system-ui, sans-serif';
@@ -263,6 +276,50 @@ export async function makeReport(meta, g) {
   x.font = '400 18px system-ui, sans-serif'; x.fillStyle = '#a1a1aa';
   x.fillText('Schätzung nach PSA-Zentrierungsrichtlinie, kein offizielles Grading. Erstellt mit Kartenwert.', pad, H - pad);
   return new Promise((res) => c.toBlob(res, 'image/png'));
+}
+
+/** Zustands-Checkliste (gilt für die ganze Karte). */
+export const defaultChecklist = () => ({
+  scratches: false, scratchCount: 0, scratchWhere: '',
+  edgeWhitening: 'none', edgeWhiteningSpots: 0, cornerWhitening: 0,
+  holoDamage: 'none', creases: 'none', dents: 0, stains: false, printLines: false, notes: '',
+});
+export const CHECK_LABELS = {
+  edgeWhitening: { none: 'keine', light: 'leicht', medium: 'mittel', heavy: 'stark' },
+  holoDamage: { none: 'unbeschädigt', light_scratches: 'leichte Kratzer im Holo', wear: 'Holo abgerieben', dents: 'Druckstellen im Holo', not_holo: 'kein Holo' },
+  creases: { none: 'keine', slight_bend: 'leicht gewölbt', crease: 'Knick' },
+};
+/** Teilnoten aus der Checkliste. Knick deckelt die Gesamtnote. */
+export function checklistScores(c) {
+  if (!c) return null;
+  const corners = 10 - 1.125 * Math.min(4, c.cornerWhitening || 0);
+  const edgeBase = { none: 10, light: 9, medium: 7.5, heavy: 5.5 }[c.edgeWhitening] ?? 10;
+  const edges = edgeBase - 0.25 * Math.max(0, (c.edgeWhiteningSpots || 0) - 2);
+  let surface = 10;
+  if (c.scratches) surface -= 0.5 + 0.5 * Math.min(6, Math.max(1, c.scratchCount || 1));
+  surface -= { none: 0, not_holo: 0, light_scratches: 1, wear: 2, dents: 2.5 }[c.holoDamage] ?? 0;
+  surface -= 1 * Math.min(4, c.dents || 0);
+  if (c.stains) surface -= 1.5;
+  if (c.printLines) surface -= 0.5;
+  if (c.creases === 'slight_bend') surface -= 2;
+  if (c.creases === 'crease') surface = Math.min(surface, 3);
+  const r = (v) => Math.max(1, Math.round(v * 2) / 2);
+  return { corners: r(corners), edges: r(edges), surface: r(surface), cap: c.creases === 'crease' ? 4 : 10 };
+}
+/** Checkliste als Stichpunkte (für Bericht und Bestand). */
+export function checklistLines(c) {
+  if (!c) return [];
+  const L = [];
+  L.push(c.scratches ? `Kratzer: ja, ${c.scratchCount || 'einige'}${c.scratchWhere ? ' – ' + c.scratchWhere : ''}` : 'Kratzer: keine');
+  L.push(`Weißung Kanten: ${CHECK_LABELS.edgeWhitening[c.edgeWhitening]}${c.edgeWhiteningSpots ? ', ' + c.edgeWhiteningSpots + ' Stellen' : ''}`);
+  L.push(`Weißung Ecken: ${c.cornerWhitening || 0} von 4`);
+  L.push(`Holo: ${CHECK_LABELS.holoDamage[c.holoDamage]}`);
+  L.push(`Knick/Biegung: ${CHECK_LABELS.creases[c.creases]}`);
+  if (c.dents) L.push(`Dellen/Druckstellen: ${c.dents}`);
+  if (c.stains) L.push('Flecken/Verschmutzung: ja');
+  if (c.printLines) L.push('Druckfehler/Print-Lines: ja');
+  if (c.notes) L.push(`Notiz: ${c.notes}`);
+  return L;
 }
 
 // ---------------- UI ----------------
@@ -296,13 +353,16 @@ export async function shareReport(meta, g, toast) {
   toast && toast('Bericht gespeichert');
 }
 
-export function createGrading({ root, getCard, onApply, toast }) {
+export function createGrading({ root, getCard, onApply, toast, getAiKey = () => '' }) {
   const st = {
     side: 'front',
     mode: 'straighten',
     filter: false,
     sides: { front: newSide(), back: newSide() },
     overrides: { corners: null, edges: null, surface: null },
+    checklist: defaultChecklist(),
+    aiSummary: { front: '', back: '' },
+    aiBusy: false,
     drag: null,
     loupe: null,
     selected: null,
@@ -310,6 +370,7 @@ export function createGrading({ root, getCard, onApply, toast }) {
 
   root.innerHTML = `
     <div class="card" id="g-for"></div>
+    <div class="card" id="g-wizard"></div>
     <div class="card">
       <div class="seg" id="g-side"><button data-s="front" class="on">Vorderseite</button><button data-s="back">Rückseite</button></div>
       <div class="grid2" style="margin-top:6px">
@@ -327,6 +388,7 @@ export function createGrading({ root, getCard, onApply, toast }) {
         <div class="inline g-tools hidden" id="g-tools-measure">
           <button class="small" id="g-filter">Oberflächen-Filter</button>
           <button class="small" id="g-reset-lines">Linien zurücksetzen</button>
+          <button class="small primary" id="g-ai">KI-Analyse</button>
         </div>
         <div class="g-live hidden" id="g-live"></div>
         <div class="inline g-tools"><button class="small" id="g-fix">Foto fixieren</button><span class="hint" id="g-fix-hint">Seite lässt sich scrollen; Griffe direkt ziehen.</span></div>
@@ -335,6 +397,8 @@ export function createGrading({ root, getCard, onApply, toast }) {
       </div>
     </div>
     <div class="card" id="g-center"></div>
+    <div class="card" id="g-ai-out"></div>
+    <div class="card" id="g-check"></div>
     <div class="card" id="g-defects"></div>
     <div class="card" id="g-result"></div>`;
 
@@ -627,7 +691,9 @@ export function createGrading({ root, getCard, onApply, toast }) {
       ctx.lineWidth = 2;
       ctx.strokeStyle = d.sev >= 3 ? '#ff453a' : d.sev === 2 ? '#ff9f0a' : '#ffd60a';
       ctx.fillStyle = 'rgba(0,0,0,.55)';
+      ctx.setLineDash(d.ai ? [4, 3] : []);
       ctx.beginPath(); ctx.arc(x, y, st.selected === d.id ? 15 : 12, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.setLineDash([]);
       ctx.fillStyle = '#fff'; ctx.font = '600 12px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(String(i + 1), x, y);
     });
@@ -740,13 +806,18 @@ export function createGrading({ root, getCard, onApply, toast }) {
     const cb = b.img ? centering(b.lines) : null;
     const cap = cf ? centeringCap(cf.worst, cb ? cb.worst : null) : 10;
     const all = [...f.defects, ...b.defects];
-    const auto = { corners: subScore(all, 'corner'), edges: subScore(all, 'edge'), surface: subScore(all, 'surface') };
+    const cs = checklistScores(st.checklist);
+    const auto = {
+      corners: Math.min(subScore(all, 'corner'), cs.corners),
+      edges: Math.min(subScore(all, 'edge'), cs.edges),
+      surface: Math.min(subScore(all, 'surface'), cs.surface),
+    };
     const sub = {
       corners: st.overrides.corners ?? auto.corners,
       edges: st.overrides.edges ?? auto.edges,
       surface: st.overrides.surface ?? auto.surface,
     };
-    return { cf, cb, cap, auto, sub, overall: overallGrade({ cap, ...sub }), defects: all.length };
+    return { cf, cb, cap, auto, sub, overall: Math.min(cs.cap, overallGrade({ cap, ...sub })), defects: all.length };
   }
 
   function renderLive() {
@@ -797,7 +868,7 @@ export function createGrading({ root, getCard, onApply, toast }) {
     const items = sd.defects
       .map((d, i) => `
       <div class="g-def ${st.selected === d.id ? 'sel' : ''}" data-id="${d.id}">
-        <span class="g-num">${i + 1}</span>
+        <span class="g-num">${i + 1}${d.ai ? '<span class="ai-tag">KI</span>' : ''}</span>
         <div class="g-def-body">
           <div class="grid2">
             <select data-k="cat">${Object.entries(DEFECT_TYPES).map(([k, v]) => `<option value="${k}" ${k === d.cat ? 'selected' : ''}>${v.label}</option>`).join('')}</select>
@@ -884,6 +955,8 @@ export function createGrading({ root, getCard, onApply, toast }) {
       if (!confirm('Fotos, Linien und Mängel zurücksetzen?')) return;
       st.sides = { front: newSide(), back: newSide() };
       st.overrides = { corners: null, edges: null, surface: null };
+      st.checklist = defaultChecklist();
+      st.aiSummary = { front: '', back: '' };
       filtered = null;
       $('#g-stage-wrap', root).classList.add('hidden');
       renderAll();
@@ -892,10 +965,172 @@ export function createGrading({ root, getCard, onApply, toast }) {
 
   function renderAll() {
     renderFor();
+    renderWizard();
     renderHelp();
     renderCenter();
+    renderAiOut();
+    renderChecklist();
     renderDefects();
     renderResult();
+  }
+
+  // ---------- KI-Analyse ----------
+  function renderAiOut() {
+    const el = $('#g-ai-out', root);
+    const sm = st.aiSummary.front || st.aiSummary.back;
+    el.classList.toggle('hidden', !sm && !st.aiBusy && !st.aiError);
+    el.innerHTML = st.aiBusy
+      ? '<p class="status">KI analysiert das Foto … (dauert etwa 20–60 Sekunden)</p>'
+      : st.aiError
+        ? `<p class="err">${esc(st.aiError)}</p>`
+        : `<h2>KI-Einschätzung</h2>
+           ${st.aiSummary.front ? `<p class="meta"><b>Vorne:</b> ${esc(st.aiSummary.front)}</p>` : ''}
+           ${st.aiSummary.back ? `<p class="meta"><b>Hinten:</b> ${esc(st.aiSummary.back)}</p>` : ''}
+           ${st.aiConfidence ? `<p class="meta">Sicherheit der KI: ${{ low: 'gering', medium: 'mittel', high: 'hoch' }[st.aiConfidence]}</p>` : ''}
+           <p class="date">Vorschläge der KI sind mit „KI“ markiert und gelten erst, wenn du sie geprüft hast. Falsche Marker löschen, fehlende antippen, Checkliste anpassen.</p>`;
+  }
+
+  /** Entzerrtes Foto einer Seite als JPEG (base64, max. 1100 px Höhe). */
+  function sideJpeg(sd) {
+    const sc = Math.min(1, 1100 / sd.img.height);
+    const c = document.createElement('canvas');
+    c.width = Math.round(sd.img.width * sc);
+    c.height = Math.round(sd.img.height * sc);
+    c.getContext('2d').drawImage(sd.img, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.85).split(',')[1];
+  }
+
+  /** KI bewertet alle vorhandenen Seiten (vorne + hinten) in einer Anfrage. */
+  async function runAi() {
+    const sides = ['front', 'back'].filter((s) => st.sides[s].img);
+    if (!sides.length || st.aiBusy) return;
+    st.aiBusy = true;
+    st.aiError = '';
+    renderAiOut();
+    try {
+      const card = getCard();
+      const key = getAiKey();
+      const res = await fetch('/api/ai-grade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(key ? { 'X-Anthropic-Key': key } : {}) },
+        body: JSON.stringify({ images: sides.map((s) => ({ side: s, image: sideJpeg(st.sides[s]) })), card: card ? `${card.name} (${card.set?.name || ''} ${card.localId})` : '' }),
+      });
+      const ct = res.headers.get('content-type') || '';
+      if (!ct.includes('json')) throw new Error('KI-Analyse geht nur in der Online-Version (Cloudflare).');
+      const out = await res.json();
+      if (res.status === 501) throw new Error('Kein Anthropic-API-Schlüssel hinterlegt. Unter Optionen eintragen.');
+      if (out.error === 'key_invalid') throw new Error('Der Anthropic-API-Schlüssel wurde abgelehnt.');
+      if (out.error === 'rate_limited') throw new Error('Zu viele Anfragen – bitte kurz warten.');
+      if (out.error) throw new Error('KI-Analyse fehlgeschlagen (' + out.error + ').');
+      applyAi(out.result, sides);
+    } catch (e) {
+      st.aiError = e.message;
+    } finally {
+      st.aiBusy = false;
+      draw();
+      renderAll();
+    }
+  }
+  $('#g-ai', root).addEventListener('click', runAi);
+
+  function applyAi(r, sides) {
+    for (const s of sides) {
+      const sd = st.sides[s];
+      // alte KI-Marker dieser Seite ersetzen, eigene behalten
+      sd.defects = sd.defects.filter((d) => !d.ai).concat(
+        r.defects.filter((d) => d.side === s).map((d) => ({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), x: d.x, y: d.y, cat: d.cat, kind: d.kind, sev: d.sev, note: d.note, ai: true })),
+      );
+    }
+    // Checkliste: KI-Gesamtbild übernehmen, eigene Notiz behalten
+    st.checklist = { ...st.checklist, ...r.checklist, notes: st.checklist.notes };
+    st.aiSummary = { front: r.summaryFront || '', back: r.summaryBack || '' };
+    st.aiConfidence = r.confidence;
+    st.mode = 'defect';
+    $$('#g-mode button', root).forEach((x) => x.classList.toggle('on', x.dataset.m === 'defect'));
+  }
+
+  // ---------- Geführter Scan (vorne, dann hinten, dann KI) ----------
+  st.wizard = null;
+  function renderWizard() {
+    const el = $('#g-wizard', root);
+    if (!el) return;
+    const f = !!st.sides.front.img, b = !!st.sides.back.img;
+    const step = (n, label, done, active) => `<div class="wz-step ${done ? 'done' : ''} ${active ? 'active' : ''}"><span>${done ? '✓' : n}</span>${label}</div>`;
+    el.innerHTML = `
+      <div class="wz-steps">
+        ${step(1, 'Vorderseite', f, !f)}
+        ${step(2, 'Rückseite', b, f && !b)}
+        ${step(3, 'KI-Grading', !!(st.aiSummary.front || st.aiSummary.back), f && b)}
+      </div>
+      ${!f ? `<label class="btn primary block">Vorderseite fotografieren<input type="file" accept="image/*" capture="environment" data-wz="front" hidden /></label>
+              <label class="btn block">Vorderseite aus Galerie<input type="file" accept="image/*" data-wz="front" hidden /></label>`
+        : !b ? `<label class="btn primary block">Rückseite fotografieren<input type="file" accept="image/*" capture="environment" data-wz="back" hidden /></label>
+                <label class="btn block">Rückseite aus Galerie<input type="file" accept="image/*" data-wz="back" hidden /></label>`
+        : `<button class="primary block" id="wz-ai">${st.aiSummary.front || st.aiSummary.back ? 'KI-Grading erneut ausführen' : 'KI-Grading beider Seiten starten'}</button>`}
+      <p class="hint">Karte flach auf einen einfarbigen Untergrund legen, von oben fotografieren. Die App begradigt jede Seite automatisch; Ecken und Linien lassen sich danach korrigieren.</p>`;
+    $$('[data-wz]', el).forEach((inp) => inp.addEventListener('change', (e) => wizardPick(e, inp.dataset.wz)));
+    const ai = $('#wz-ai', el);
+    if (ai) ai.addEventListener('click', runAi);
+  }
+  function wizardPick(e, which) {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const im = new Image();
+    im.onload = () => {
+      const s = Math.min(1, 1600 / Math.max(im.naturalWidth, im.naturalHeight));
+      const c = document.createElement('canvas');
+      c.width = Math.round(im.naturalWidth * s);
+      c.height = Math.round(im.naturalHeight * s);
+      c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+      st.side = which;
+      $$('#g-side button', root).forEach((x) => x.classList.toggle('on', x.dataset.s === which));
+      const sd = side();
+      sd.raw = c;
+      sd.defects = [];
+      sd.corners = detectCorners(c) || defaultCorners(c);
+      // automatisch begradigen
+      sd.img = warpCard(c, sd.corners, Math.min(1200, Math.max(800, Math.round(c.height * 0.8))), 0.04);
+      sd.straight = true;
+      sd.lines = autoDetect(sd.img, { cropped: false }) || defaultLines();
+      filtered = null;
+      $('#g-stage-wrap', root).classList.remove('hidden');
+      setMode('center');
+      renderAll();
+      URL.revokeObjectURL(im.src);
+      if (which === 'back' && st.sides.front.img && getAiKey()) runAi();
+    };
+    im.src = URL.createObjectURL(f);
+    e.target.value = '';
+  }
+
+  // ---------- Checkliste ----------
+  function renderChecklist() {
+    const c = st.checklist;
+    const opt = (map, val) => Object.entries(map).map(([k, l]) => `<option value="${k}" ${k === val ? 'selected' : ''}>${l}</option>`).join('');
+    $('#g-check', root).innerHTML = `
+      <h2>Zustand (Stichpunkte)</h2>
+      <div class="check-grid">
+        <label class="check"><input type="checkbox" data-c="scratches" ${c.scratches ? 'checked' : ''}/> Kratzer</label>
+        <label>Anzahl<input data-c="scratchCount" inputmode="numeric" value="${c.scratchCount || ''}" placeholder="0" /></label>
+        <label class="wide">Wo?<input data-c="scratchWhere" value="${esc(c.scratchWhere)}" placeholder="z. B. quer durchs Holo, Rückseite links oben" /></label>
+        <label>Weißung Kanten<select data-c="edgeWhitening">${opt(CHECK_LABELS.edgeWhitening, c.edgeWhitening)}</select></label>
+        <label>Weiße Stellen<input data-c="edgeWhiteningSpots" inputmode="numeric" value="${c.edgeWhiteningSpots || ''}" placeholder="0" /></label>
+        <label>Ecken mit Weißung<select data-c="cornerWhitening">${[0, 1, 2, 3, 4].map((n) => `<option ${n === +c.cornerWhitening ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+        <label>Holo<select data-c="holoDamage">${opt(CHECK_LABELS.holoDamage, c.holoDamage)}</select></label>
+        <label>Knick/Biegung<select data-c="creases">${opt(CHECK_LABELS.creases, c.creases)}</select></label>
+        <label>Dellen<input data-c="dents" inputmode="numeric" value="${c.dents || ''}" placeholder="0" /></label>
+        <label class="check"><input type="checkbox" data-c="stains" ${c.stains ? 'checked' : ''}/> Flecken</label>
+        <label class="check"><input type="checkbox" data-c="printLines" ${c.printLines ? 'checked' : ''}/> Druckfehler</label>
+        <label class="wide">Notiz<input data-c="notes" value="${esc(c.notes)}" placeholder="weitere Auffälligkeiten" /></label>
+      </div>
+      <p class="date">Fließt in die Teilnoten ein (jeweils der schlechtere Wert aus Checkliste und markierten Stellen). Ein Knick begrenzt die Note auf höchstens 4.</p>`;
+    $$('[data-c]', root).forEach((inp) => inp.addEventListener('change', () => {
+      const k = inp.dataset.c;
+      c[k] = inp.type === 'checkbox' ? inp.checked : ['scratchCount', 'edgeWhiteningSpots', 'cornerWhitening', 'dents'].includes(k) ? Math.max(0, parseInt(inp.value, 10) || 0) : inp.value;
+      if (k === 'scratchCount' && c[k] > 0) c.scratches = true;
+      renderChecklist();
+      renderResult();
+    }));
   }
 
   /** Ergebnis-Objekt zum Speichern (Fotos verkleinert, damit IndexedDB klein bleibt). */
@@ -946,6 +1181,8 @@ export function createGrading({ root, getCard, onApply, toast }) {
         back: r.cb && { lr: r.cb.lr, tb: r.cb.tb },
       },
       defects: ['front', 'back'].flatMap((s) => st.sides[s].defects.map((d) => ({ ...d, side: s }))),
+      checklist: { ...st.checklist },
+      aiSummary: [st.aiSummary.front && 'Vorne: ' + st.aiSummary.front, st.aiSummary.back && 'Hinten: ' + st.aiSummary.back].filter(Boolean).join(' '),
       photos: { front: small(st.sides.front), back: small(st.sides.back) },
     };
   }

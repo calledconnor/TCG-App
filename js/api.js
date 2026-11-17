@@ -173,7 +173,15 @@ export async function searchSmart(lang, name, available = {}) {
     if (words.every((w) => n.includes(w))) return 3;
     return 4;
   };
-  // fehlende Bilder: Pfad aus einer anderen Karte desselben Sets ableiten (englische Ausgabe hat fast immer Bilder)
+  // ohne Bild: zuerst englische Ausgabe derselben Karte abfragen (max. 24, 30 Tage gecacht)
+  const missing = [...merged.values()].filter((c) => !c.image).slice(0, 24);
+  await Promise.all(missing.map(async (c) => {
+    try {
+      const r = await getJSON(`/en/cards/${encodeURIComponent(c.id)}`, { maxAge: 30 * DAY });
+      if (r.data && r.data.image) c.image = r.data.image;
+    } catch {}
+  }));
+  // danach noch ohne Bild: Pfad aus einer anderen Karte desselben Sets ableiten
   const setBase = {};
   for (const c of merged.values()) {
     const m = c.image && c.image.match(/^(https:\/\/assets\.tcgdex\.net\/)[^/]+(\/.+\/)[^/]+$/);
@@ -182,14 +190,6 @@ export async function searchSmart(lang, name, available = {}) {
   for (const c of merged.values()) {
     if (!c.image && setBase[c.setId]) c.image = setBase[c.setId][1] + 'en' + setBase[c.setId][2] + c.localId;
   }
-  // weiterhin ohne Bild: englische Ausgabe derselben Karte abfragen (max. 24, 30 Tage gecacht)
-  const missing = [...merged.values()].filter((c) => !c.image).slice(0, 24);
-  await Promise.all(missing.map(async (c) => {
-    try {
-      const r = await getJSON(`/en/cards/${encodeURIComponent(c.id)}`, { maxAge: 30 * DAY });
-      if (r.data && r.data.image) c.image = r.data.image;
-    } catch {}
-  }));
   const normId = (x) => String(x).toUpperCase().replace(/^([A-Z]*)0+(\d)/, '$1$2');
   let list = [...merged.values()];
   if (numFilter) {
