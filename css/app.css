@@ -436,3 +436,18 @@ html, body { touch-action: manipulation; overscroll-behavior: none; }
 .ev-details > summary::after { content: "›"; margin-left: auto; transition: transform .15s; font-size: 20px; }
 .ev-details[open] > summary::after { transform: rotate(90deg); }
 .ev-details label { margin-top: 10px; }
+
+/* Ankauf-Buch */
+.opt-btn { min-height: 36px; width: 36px; padding: 0; border-radius: 50%; background: var(--sunken); }
+.book-form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.book-form .wide { grid-column: 1 / -1; }
+.book-row { display: grid; grid-template-columns: 44px 1fr auto; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); align-items: start; position: relative; background: var(--bg); touch-action: pan-y; }
+.book-row img, .book-row .thumb-ph { width: 44px; border-radius: 4px; }
+.book-row .right { text-align: right; display: flex; flex-direction: column; align-items: flex-end; }
+.book-row.sold { opacity: .7; }
+.book-row::before, .book-row::after { position: absolute; top: 0; bottom: 0; width: 100vw; display: flex; align-items: center; color: #fff; font-weight: 600; font-size: 14px; }
+.book-row::before { content: "Verkauft"; right: 100%; justify-content: flex-end; padding-right: 20px; background: var(--pos); opacity: .7; }
+.book-row::after { content: "Löschen"; left: 100%; padding-left: 20px; background: var(--neg); opacity: .7; }
+.book-row.arm-sell::before, .book-row.arm-del::after { opacity: 1; }
+.sell-sheet { margin-top: 10px; background: var(--sunken); border-radius: 12px; padding: 10px; }
+.sell-sheet input, .sell-sheet select { background: var(--bg); }

@@ -18,6 +18,7 @@
     <h1>Kartenwert</h1>
     <button id="cart-btn" class="cart-btn hidden" aria-label="Ankaufskorb"></button>
     <span id="net-status" class="net" aria-live="polite"></span>
+    <button id="opt-btn" class="opt-btn" aria-label="Optionen"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
   </header>
 
   <main>
@@ -121,6 +122,12 @@
       <div id="calc"></div>
     </section>
 
+    <!-- ANKAUF-BUCH -->
+    <section id="view-book" class="view" aria-label="Ankauf">
+      <h2 class="page-title">Ankauf</h2>
+      <div id="book"></div>
+    </section>
+
     <!-- GRADING -->
     <section id="view-grade" class="view" aria-label="Grading">
       <h2 class="page-title">Grading-Check</h2>
@@ -143,9 +150,10 @@
   <nav class="tabbar">
     <button data-view="search" class="on">Suchen</button>
     <button data-view="eval">Bewerten</button>
+    <button data-view="book">Ankauf</button>
     <button data-view="grade">Grading</button>
     <button data-view="inv">Sammlung</button>
-    <button data-view="settings">Optionen</button>
+
   </nav>
 
   <div id="toast" class="toast" role="status"></div>
