@@ -1685,119 +1685,96 @@ function renderCart() {
 }
 
 
-// ---------- Ankauf-Buch: Eingabe mit Kartenvorschlägen, Verkaufsvorschlag (anpassbar), Bibliothek mit Bearbeiten/Foto, Wischen ----------
+// ---------- Ankauf-Buch: Einzelkarten und Sealed, Mengen, Sammelkauf mit Paketpreisen, Bibliothek mit Teilverkäufen ----------
 let book = [];
-let bookOpen = null;      // uid des Eintrags in Bearbeitung
-let draft = null;          // Formularzustand „Neu angekauft“
+let bookOpen = null;
+let draft = null;
+let lot = { items: [], total: null, groups: {} };
+const lotSel = new Set();
 const saveBook = () => kvSet('flipbook', book);
-let lot = { items: [], total: null };  // Sammelkauf in Arbeit
 const saveLot = () => kvSet('lotdraft', lot);
-async function loadBook() { book = (await kvGet('flipbook', [])) || []; lot = (await kvGet('lotdraft', null)) || { items: [], total: null }; }
-/** Gesamtpreis nach Marktwert auf die Karten verteilen; Mindestpreis je Karte für die Zielmarge. */
-function lotCalc() {
-  const cfg = flipCfg();
-  const pf = settings.platforms[settings.platform];
-  const w = lot.items.map((x) => x.market ?? x.autoVorschlag ?? x.vorschlag ?? 0);
-  const sw = w.reduce((a, b) => a + b, 0);
-  const n = lot.items.length;
-  const rows = lot.items.map((x, i) => {
-    const ek = lot.total != null && n ? lot.total * (sw > 0 ? w[i] / sw : 1 / n) : null;
-    const min = ek != null ? Math.ceil(((ek * (1 + cfg.marge) + pf.versand) / (1 - pf.provision)) * 2) / 2 : null;
-    const vk = x.vorschlag;
-    const gewinn = vk != null && ek != null ? vk * (1 - pf.provision) - pf.versand - ek : null;
-    return { x, ek, min, vk, gewinn };
-  });
-  const markt = lot.items.reduce((a, x) => a + (x.market || 0), 0);
-  const vkSum = rows.reduce((a, r) => a + (r.vk || 0), 0);
-  const gewinn = rows.reduce((a, r) => a + (r.gewinn || 0), 0);
-  return { rows, markt, vkSum, gewinn, quote: lot.total != null && markt > 0 ? lot.total / markt : null, marge: cfg.marge };
-}
-function lotHtml(cls) {
-  if (!lot.items.length) return '';
-  const c = lotCalc();
-  return `<div class="card lot">
-    <h2>Sammelkauf · ${lot.items.length} Karten</h2>
-    <label>Gesamt bezahlt €<input id="lot-total" inputmode="decimal" value="${lot.total != null ? n2(lot.total) : ''}" placeholder="z. B. 50" /></label>
-    <div class="hero" style="margin-top:10px">
-      <div class="lbl">Erwarteter Gewinn zusammen</div>
-      <div class="val ${cls(c.gewinn)}">${lot.total != null ? (c.gewinn > 0 ? '+' : '') + eur(c.gewinn) : '–'}</div>
-      <div class="sub">Marktwert ${eur(c.markt)}${c.quote != null ? ` · bezahlt ${fmt1(c.quote * 100)} % vom Marktwert` : ''} · Verkauf zusammen ${eur(c.vkSum)}</div>
-    </div>
-    ${c.rows.map((r, i) => `<div class="lot-row">
-      <div><div class="n">${esc(r.x.name)}${r.x.nr ? ' <span class="meta">' + esc(r.x.nr) + '</span>' : ''}</div>
-        <div class="meta">${esc(r.x.note || '–')} · Marktwert ${r.x.market != null ? eur(r.x.market) : '–'}${r.ek != null ? ` · anteilig bezahlt <b>${eur(r.ek)}</b>` : ''}</div>
-        ${r.min != null ? `<div class="date">mind. ${eur(r.min)} für ${fmt1(c.marge * 100)} % Marge${r.gewinn != null ? ` · Gewinn <b class="${cls(r.gewinn)}">${eur(r.gewinn)}</b>` : ''}</div>` : ''}</div>
-      <label class="lot-vk">Verkauf €<input data-lotvk="${i}" inputmode="decimal" value="${r.vk != null ? n2(r.vk) : ''}" /></label>
-      <button class="x" data-lotdel="${i}" aria-label="Entfernen">×</button>
-    </div>`).join('')}
-    <div class="grid2" style="margin-top:10px">
-      <button data-lotmin="1">Alle auf Mindestpreis</button>
-      <button data-lotdrop="1">Verwerfen</button>
-    </div>
-    <button class="primary block" id="lot-save" style="margin-top:8px">Kauf speichern (${lot.items.length} Karten)</button>
-  </div>`;
-}
-function bindLot(el) {
-  const t = $('#lot-total', el);
-  if (!t) return;
-  t.addEventListener('change', () => { lot.total = parseNum(t.value); saveLot(); renderBook(); });
-  $$('[data-lotvk]', el).forEach((inp) => inp.addEventListener('change', () => { const x = lot.items[+inp.dataset.lotvk]; x.vorschlag = parseNum(inp.value); x.manual = true; saveLot(); renderBook(); }));
-  $$('[data-lotdel]', el).forEach((b) => b.addEventListener('click', () => { lot.items.splice(+b.dataset.lotdel, 1); saveLot(); renderBook(); }));
-  $('[data-lotmin]', el).addEventListener('click', () => { lotCalc().rows.forEach((r) => { if (r.min != null) { r.x.vorschlag = r.min; r.x.manual = true; } }); saveLot(); renderBook(); });
-  $('[data-lotdrop]', el).addEventListener('click', () => { if (confirm('Sammelkauf verwerfen?')) { lot = { items: [], total: null }; saveLot(); renderBook(); } });
-  $('#lot-save', el).addEventListener('click', () => {
-    if (lot.total == null) return toast('Gesamtpreis eintragen');
-    const c = lotCalc(), lotId = uid(), now = Date.now();
-    c.rows.forEach((r) => book.unshift({ ...r.x, ek: Math.round(r.ek * 100) / 100, uid: uid(), datum: now, vk: null, lotId, notiz: [r.x.notiz, `Sammelkauf ${c.rows.length} Karten für ${eur(lot.total)}`].filter(Boolean).join(' · ') }));
-    saveBook();
-    lot = { items: [], total: null }; saveLot();
-    renderBook();
-    toast(`${c.rows.length} Karten gespeichert`);
-  });
-}
-const NOTE_COND = { MT: 'MT', NM: 'NM', EX: 'EX', GD: 'GD', LP: 'LP', PL: 'PL', PO: 'PO' };
-const newDraft = () => ({ name: '', nr: '', note: 'NM', lang: tcgLangToLf(settings.searchLang) || 'de', ek: null, vorschlag: null, manual: false, notiz: '', cardId: null, cardLang: null, image: null, market: null, vorschlagInfo: '' });
-
-/** Marktwert + Verkaufsvorschlag. Mit cardId exakt, sonst Suche über Name/Nummer. Überschreibt keinen manuellen Preis. */
-async function suggestPrice(e) {
-  const cfg = flipCfg();
-  const pf = settings.platforms[settings.platform];
-  const target = e.ek != null ? (e.ek * (1 + cfg.marge) + pf.versand) / (1 - pf.provision) : null;
-  let market = null, note = '';
-  try {
-    let id = e.cardId, lang = e.cardLang;
-    if (!id && e.name) {
-      const list = await searchSmart(settings.searchLang, `${e.name}${e.nr ? ' ' + e.nr : ''}`, langAvail);
-      if (list[0] && list[0]._s < 3) { id = list[0].id; lang = list[0].lang || settings.searchLang; e.match = `${list[0].name} · ${list[0].setName || ''} ${list[0].localId}`; }
-    }
-    if (id) {
-      const r = await getCard(lang, id, { force: false });
-      if (r.data) {
-        const base = combine(marketSources(extractPricing(r.data), null, []));
-        const cond = NOTE_COND[(e.note || '').toUpperCase()] || 'NM';
-        const lf = settings.lf[e.lang] != null ? e.lang : 'en';
-        if (base != null) market = marktwert({ referenz: base, cf: settings.cf, lf: settings.lf, zustand: cond, sprache: lf, refZustand: 'NM', refSprache: 'en' });
-        e.cardId = id; e.cardLang = lang;
-        e.image = e.image || r.data.image || null;
-        e.match = e.match || `${r.data.name} · ${r.data.set?.name || ''} ${r.data.localId}`;
-        if (/^(PSA|BGS|CGC|SGC)/i.test(e.note || '')) note = 'Gegradet: Marktwert gilt ungegradet – Graded-Preis über „Bewerten“ prüfen und Preis anpassen.';
-      }
-    }
-  } catch {}
-  e.market = market;
-  e.marketAt = Date.now();
-  const auto = market != null ? roundPrice(market * (1 - cfg.undercut)) : target != null ? Math.ceil(target * 2) / 2 : null;
-  if (!e.manual) e.vorschlag = auto;
-  e.autoVorschlag = auto;
-  e.vorschlagInfo = market != null ? `Marktwert ${eur(market)}${e.match ? ' (' + e.match + ')' : ''} · Vorschlag ${fmt1(cfg.undercut * 100)} % darunter` : target != null ? `Keine Marktdaten – Einkauf + ${fmt1(cfg.marge * 100)} % Marge + Gebühren` : '';
-  e.hinweis = note;
+function migrateEntry(e) {
+  if (e.menge == null) {
+    e.menge = 1;
+    e.sales = e.vk != null ? [{ n: 1, preis: e.vk, versand: e.versand ?? 0, pf: e.vkPlattform || 'cardmarket', datum: e.vkDatum || Date.now() }] : [];
+    delete e.vk; delete e.versand; delete e.vkPlattform; delete e.vkDatum;
+  }
+  e.typ = e.typ || 'karte'; e.sales = e.sales || []; e.opened = e.opened || 0;
   return e;
 }
+async function loadBook() {
+  book = ((await kvGet('flipbook', [])) || []).map(migrateEntry);
+  lot = (await kvGet('lotdraft', null)) || { items: [], total: null, groups: {} };
+  lot.groups = lot.groups || {};
+}
+const NOTE_COND = { MT: 'MT', NM: 'NM', EX: 'EX', GD: 'GD', LP: 'LP', PL: 'PL', PO: 'PO' };
+const NOTE_LIST = ['MT', 'NM', 'EX', 'GD', 'LP', 'PL', 'PO', 'PSA 10', 'PSA 9', 'PSA 8', 'PSA 7', 'BGS 9.5', 'BGS 9', 'CGC 10', 'CGC 9.5'];
+const SEALED_LIST = ['OVP versiegelt', 'OVP, Folie beschädigt', 'geöffnet'];
+const newDraft = (typ = 'karte') => ({ typ, name: '', nr: '', note: typ === 'sealed' ? 'OVP versiegelt' : 'NM', lang: tcgLangToLf(settings.searchLang) || 'de', menge: 1, ek: null, marketIn: '', vorschlag: null, manual: false, notiz: '', cardId: null, cardLang: null, image: null, market: null, vorschlagInfo: '' });
 
-function bookProfit(e, vk = e.vk, versand = e.versand) {
-  const pf = settings.platforms[e.vkPlattform || settings.platform] || settings.platforms.cardmarket;
-  const netto = vk * (1 - pf.provision) - (versand ?? 0);
-  return { netto, gewinn: netto - (e.ek || 0) };
+const pfOf = (k) => settings.platforms[k] || settings.platforms[settings.platform];
+const unitEk = (e) => (e.ek || 0) / (e.menge || 1);
+const soldN = (e) => e.sales.filter((s) => !s.inhalt).reduce((a, s) => a + s.n, 0);
+const restOf = (e) => Math.max(0, (e.menge || 1) - soldN(e) - (e.opened || 0));
+const saleNetto = (s) => s.preis * s.n * (1 - pfOf(s.pf).provision) - (s.versand || 0);
+function bookStats(e) {
+  const rest = restOf(e), gone = (e.menge || 1) - rest;
+  const netto = e.sales.reduce((a, s) => a + saleNetto(s), 0);
+  return { rest, gone, netto, umsatz: e.sales.reduce((a, s) => a + s.preis * s.n, 0), gewinn: netto - unitEk(e) * gone, done: rest === 0 };
+}
+const expProfit = (ekU, vk) => { const pf = settings.platforms[settings.platform]; return vk * (1 - pf.provision) - pf.versand - ekU; };
+const minPrice = (ekU) => { const cfg = flipCfg(), pf = settings.platforms[settings.platform]; return Math.ceil(((ekU * (1 + cfg.marge) + pf.versand) / (1 - pf.provision)) * 2) / 2; };
+function parseRange(v) {
+  const m = String(v || '').match(/(\d+(?:[.,]\d+)?)\s*(?:-|–|bis)\s*(\d+(?:[.,]\d+)?)/);
+  if (m) { const a = parseNum(m[1]), b = parseNum(m[2]); return { mid: (a + b) / 2, min: Math.min(a, b), max: Math.max(a, b) }; }
+  const n = parseNum(v);
+  return n != null ? { mid: n, min: null, max: null } : null;
+}
+const cmLink = (name) => `https://www.cardmarket.com/de/Pokemon/Products/Search?searchString=${encodeURIComponent(name || '')}`;
+
+/** Marktwert je Stück + Verkaufsvorschlag je Stück. Eigener Marktwert (auch Spanne 8-18) hat Vorrang, sonst TCGdex. Manuellen Preis nie überschreiben. */
+async function suggestPrice(e) {
+  const cfg = flipCfg();
+  const ekU = e.ek != null ? e.ek / (e.menge || 1) : null;
+  const target = ekU != null ? minPrice(ekU) : null;
+  let market = null, note = '', range = '';
+  const own = parseRange(e.marketIn);
+  if (own) {
+    market = own.mid;
+    if (own.min != null) range = `${eur(own.min)}–${eur(own.max)}, Mitte `;
+  } else if (e.typ !== 'sealed') {
+    try {
+      let id = e.cardId, lang = e.cardLang;
+      if (!id && e.name) {
+        const list = await searchSmart(settings.searchLang, `${e.name}${e.nr ? ' ' + e.nr : ''}`, langAvail);
+        if (list[0] && list[0]._s < 3) { id = list[0].id; lang = list[0].lang || settings.searchLang; e.match = `${list[0].name} · ${list[0].setName || ''} ${list[0].localId}`; }
+      }
+      if (id) {
+        const r = await getCard(lang, id, { force: false });
+        if (r.data) {
+          const base = combine(marketSources(extractPricing(r.data), null, []));
+          const cond = NOTE_COND[(e.note || '').toUpperCase()] || 'NM';
+          const sp = settings.lf[e.lang] != null ? e.lang : 'en';
+          if (base != null) market = marktwert({ referenz: base, cf: settings.cf, lf: settings.lf, zustand: cond, sprache: sp, refZustand: 'NM', refSprache: 'en' });
+          e.cardId = id; e.cardLang = lang;
+          e.image = e.image || r.data.image || null;
+          e.match = e.match || `${r.data.name} · ${r.data.set?.name || ''} ${r.data.localId}`;
+          if (/^(PSA|BGS|CGC|SGC)/i.test(e.note || '')) note = 'Gegradet: Marktwert gilt ungegradet, Graded-Preis über „Bewerten“ prüfen oder Marktwert selbst eintragen.';
+        }
+      }
+    } catch {}
+  }
+  e.market = market;
+  e.marketAt = Date.now();
+  const auto = market != null ? roundPrice(market * (1 - cfg.undercut)) : target;
+  if (!e.manual) e.vorschlag = auto;
+  e.autoVorschlag = auto;
+  const per = (e.menge || 1) > 1 ? ' je Stück' : '';
+  e.vorschlagInfo = market != null
+    ? `Marktwert${per} ${range}${eur(market)}${e.match && !own ? ' (' + e.match + ')' : ''} · Vorschlag ${fmt1(cfg.undercut * 100)} % darunter${target != null ? ` · mind. ${eur(target)} für ${fmt1(cfg.marge * 100)} % Marge` : ''}`
+    : target != null ? `Kein Marktwert, Mindestpreis${per} für ${fmt1(cfg.marge * 100)} % Marge: ${eur(target)}` : (e.typ === 'sealed' ? 'Marktwert je Stück eintragen, z. B. 8-18' : '');
+  e.hinweis = note;
+  return e;
 }
 
 function photoToData(file, max = 700) {
@@ -1815,105 +1792,233 @@ function photoToData(file, max = 700) {
     im.src = URL.createObjectURL(file);
   });
 }
-const thumbOf = (e) => (e.photo ? `<img src="${e.photo}" alt="">` : e.image ? img(e.image, 'low', e.name) : '<div class="thumb-ph">–</div>');
+const thumbOf = (e) => (e.photo ? `<img src="${e.photo}" alt="">` : e.image ? img(e.image, 'low', e.name) : `<div class="thumb-ph">${e.typ === 'sealed' ? 'OVP' : '–'}</div>`);
 const langSel = (id, val, attr = 'id') => `<select ${attr}="${id}">${LANG_CHIPS.filter((k) => settings.lf[k] != null).map((k) => `<option value="${k}" ${k === val ? 'selected' : ''}>${LANG_LABELS[k]}</option>`).join('')}</select>`;
-const NOTE_LIST = ['MT', 'NM', 'EX', 'GD', 'LP', 'PL', 'PO', 'PSA 10', 'PSA 9', 'PSA 8', 'PSA 7', 'BGS 9.5', 'BGS 9', 'CGC 10', 'CGC 9.5'];
+const clsOf = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : '');
+const signEur = (v) => `${v > 0 ? '+' : ''}${eur(v)}`;
 
+// ----- Sammelkauf -----
+const grpName = (g) => 'Paket ' + String.fromCharCode(65 + Object.keys(lot.groups).indexOf(g));
+function cleanGroups() {
+  Object.keys(lot.groups).forEach((g) => { if (!lot.items.some((x) => x.grp === g)) delete lot.groups[g]; });
+}
+/** Paketpreise gehen an ihre Karten, der Rest vom Gesamtpreis wird nach Marktwert × Menge verteilt. */
+function lotCalc() {
+  const items = lot.items, cfg = flipCfg();
+  const w = items.map((x) => (x.market ?? x.autoVorschlag ?? x.vorschlag ?? 0) * (x.menge || 1));
+  const idx = items.map((_, i) => i);
+  const grpSum = Object.values(lot.groups).reduce((a, b) => a + (b || 0), 0);
+  const free = idx.filter((i) => !items[i].grp);
+  const total = lot.total != null ? lot.total : !free.length && items.length ? grpSum : null;
+  const restSum = total != null ? total - grpSum : null;
+  const ekMap = {};
+  const share = (ids, amount) => { const sw = ids.reduce((a, i) => a + w[i], 0); ids.forEach((i) => { ekMap[i] = amount * (sw > 0 ? w[i] / sw : 1 / ids.length); }); };
+  Object.entries(lot.groups).forEach(([g, p]) => share(idx.filter((i) => items[i].grp === g), p));
+  if (restSum != null && free.length) share(free, restSum);
+  const rows = items.map((x, i) => {
+    const m = x.menge || 1, ek = ekMap[i] ?? null, ekU = ek != null ? ek / m : null;
+    const vk = x.vorschlag;
+    return { x, i, m, ek, ekU, min: ekU != null ? minPrice(ekU) : null, vk, gewinn: vk != null && ekU != null ? expProfit(ekU, vk) * m : null };
+  });
+  const markt = items.reduce((a, x) => a + (x.market || 0) * (x.menge || 1), 0);
+  return {
+    rows, total, grpSum, restSum, free: free.length, markt, marge: cfg.marge,
+    units: items.reduce((a, x) => a + (x.menge || 1), 0),
+    vkSum: rows.reduce((a, r) => a + (r.vk || 0) * r.m, 0),
+    gewinn: rows.reduce((a, r) => a + (r.gewinn || 0), 0),
+    complete: rows.every((r) => r.ek != null) && !(restSum != null && restSum < -0.005),
+    quote: total != null && markt > 0 ? total / markt : null,
+  };
+}
+function lotHtml() {
+  if (!lot.items.length) return '';
+  const c = lotCalc();
+  const groups = Object.entries(lot.groups);
+  return `<div class="card lot">
+    <div class="lot-head"><h2>Sammelkauf</h2><span class="meta">${lot.items.length} Positionen · ${c.units} Stück</span></div>
+    <div class="kpis">
+      <div><span class="meta">Bezahlt</span><b>${c.total != null ? eur(c.total) : '–'}</b></div>
+      <div><span class="meta">Marktwert</span><b>${eur(c.markt)}</b>${c.quote != null ? `<span class="meta">${fmt1(c.quote * 100)} % bezahlt</span>` : ''}</div>
+      <div><span class="meta">Verkauf geplant</span><b>${eur(c.vkSum)}</b></div>
+      <div><span class="meta">Gewinn erwartet</span><b class="${clsOf(c.gewinn)}">${c.complete ? signEur(c.gewinn) : '–'}</b></div>
+    </div>
+    <label class="lot-total">Gesamt bezahlt €<input id="lot-total" inputmode="decimal" value="${lot.total != null ? n2(lot.total) : ''}" placeholder="${c.free ? 'nötig für Karten ohne Preis' : 'optional, Pakete: ' + eur(c.grpSum)}" /></label>
+    ${c.restSum != null && c.restSum < -0.005 ? `<p class="warn">Paketpreise (${eur(c.grpSum)}) sind höher als der Gesamtpreis.</p>` : ''}
+    ${c.free && c.total == null ? '<p class="date">Karten ohne eigenen Preis: Gesamtpreis eintragen oder Karten markieren und als Paket bepreisen.</p>' : ''}
+    <div class="lot-list">
+    ${c.rows.map((r) => `<div class="lot-row ${lotSel.has(r.i) ? 'sel' : ''}">
+      <input type="checkbox" data-lotsel="${r.i}" ${lotSel.has(r.i) ? 'checked' : ''} aria-label="Auswählen" />
+      <div class="lot-main">
+        <div class="n">${r.m > 1 ? `<span class="qty">${r.m}×</span> ` : ''}${esc(r.x.name)}${r.x.nr ? ' <span class="meta">' + esc(r.x.nr) + '</span>' : ''}</div>
+        <div class="meta">${r.x.typ === 'sealed' ? 'Sealed · ' : ''}${esc(r.x.note || '–')}${r.x.grp ? ` · <span class="grp-badge">${grpName(r.x.grp)}</span>` : ''}</div>
+        <div class="lot-nums">
+          <span>Markt<b>${r.x.market != null ? eur(r.x.market) : '–'}</b></span>
+          <span>bezahlt${r.m > 1 ? '/Stk' : ''}<b>${r.ekU != null ? eur(r.ekU) : '–'}</b></span>
+          <span>mind.<b>${r.min != null ? eur(r.min) : '–'}</b></span>
+          <span>Gewinn<b class="${clsOf(r.gewinn)}">${r.gewinn != null ? signEur(r.gewinn) : '–'}</b></span>
+        </div>
+      </div>
+      <label class="lot-vk">Verkauf${r.m > 1 ? '/Stk' : ''}<input data-lotvk="${r.i}" inputmode="decimal" value="${r.vk != null ? n2(r.vk) : ''}" /></label>
+      <button class="x" data-lotdel="${r.i}" aria-label="Entfernen">×</button>
+    </div>`).join('')}
+    </div>
+    ${lotSel.size ? `<div class="sel-bar"><span>${lotSel.size} markiert · Preis zusammen €</span><input id="grp-price" inputmode="decimal" placeholder="z. B. 25" /><button class="primary" id="grp-set">Als Paket</button></div>` : '<p class="date">Mehrere Karten für einen Preis gekauft? Karten anhaken und als Paket bepreisen.</p>'}
+    ${groups.length ? `<div class="grp-list">${groups.map(([g, p]) => `<div class="grp-line"><span><b>${grpName(g)}</b> · ${lot.items.filter((x) => x.grp === g).length} Positionen für ${eur(p)}</span><button data-grpdel="${g}">lösen</button></div>`).join('')}</div>` : ''}
+    <div class="grid2" style="margin-top:12px">
+      <button data-lotmin="1">Alle auf Mindestpreis</button>
+      <button data-lotdrop="1">Verwerfen</button>
+    </div>
+    <button class="primary block" id="lot-save" style="margin-top:8px" ${c.complete ? '' : 'disabled'}>Kauf speichern · ${c.units} Stück</button>
+  </div>`;
+}
+function bindLot(el) {
+  const t = $('#lot-total', el);
+  if (!t) return;
+  t.addEventListener('change', () => { lot.total = parseNum(t.value); saveLot(); renderBook(); });
+  $$('[data-lotvk]', el).forEach((inp) => inp.addEventListener('change', () => { const x = lot.items[+inp.dataset.lotvk]; x.vorschlag = parseNum(inp.value); x.manual = x.vorschlag != null; saveLot(); renderBook(); }));
+  $$('[data-lotsel]', el).forEach((cb) => cb.addEventListener('change', () => { const i = +cb.dataset.lotsel; cb.checked ? lotSel.add(i) : lotSel.delete(i); renderBook(); }));
+  $$('[data-lotdel]', el).forEach((b) => b.addEventListener('click', () => { lot.items.splice(+b.dataset.lotdel, 1); lotSel.clear(); cleanGroups(); saveLot(); renderBook(); }));
+  $$('[data-grpdel]', el).forEach((b) => b.addEventListener('click', () => { const g = b.dataset.grpdel; lot.items.forEach((x) => { if (x.grp === g) delete x.grp; }); delete lot.groups[g]; saveLot(); renderBook(); }));
+  const gs = $('#grp-set', el);
+  if (gs) gs.addEventListener('click', () => {
+    const p = parseNum($('#grp-price', el).value);
+    if (p == null || p < 0) return toast('Preis für das Paket eintragen');
+    const g = uid();
+    lot.groups[g] = p;
+    lotSel.forEach((i) => { lot.items[i].grp = g; });
+    lotSel.clear(); cleanGroups(); saveLot(); renderBook();
+  });
+  $('[data-lotmin]', el).addEventListener('click', () => { lotCalc().rows.forEach((r) => { if (r.min != null) { r.x.vorschlag = r.min; r.x.manual = true; } }); saveLot(); renderBook(); });
+  $('[data-lotdrop]', el).addEventListener('click', () => { if (confirm('Sammelkauf verwerfen?')) { lot = { items: [], total: null, groups: {} }; lotSel.clear(); saveLot(); renderBook(); } });
+  $('#lot-save', el).addEventListener('click', () => {
+    const c = lotCalc();
+    if (!c.complete) return toast('Gesamtpreis oder Paketpreise eintragen');
+    const lotId = uid(), now = Date.now();
+    const info = `Sammelkauf ${c.units} Stück für ${eur(c.total)}`;
+    c.rows.forEach((r) => {
+      const { grp, ...x } = r.x;
+      book.unshift(migrateEntry({ ...x, ek: Math.round(r.ek * 100) / 100, uid: uid(), datum: now, sales: [], opened: 0, lotId,
+        notiz: [x.notiz, grp ? `${grpName(grp)} (${eur(lot.groups[grp])})` : '', info].filter(Boolean).join(' · ') }));
+    });
+    saveBook();
+    lot = { items: [], total: null, groups: {} }; lotSel.clear(); saveLot();
+    renderBook();
+    toast(`${c.rows.length} Positionen gespeichert`);
+  });
+}
+
+// ----- Seite -----
 function renderBook() {
   const el = $('#book');
   if (!el) return;
   draft = draft || newDraft();
   const d = draft;
-  const sold = book.filter((e) => e.vk != null);
-  const open = book.filter((e) => e.vk == null);
-  const gewinn = sold.reduce((a, e) => a + bookProfit(e).gewinn, 0);
-  const umsatz = sold.reduce((a, e) => a + e.vk, 0);
-  const ekOpen = open.reduce((a, e) => a + (e.ek || 0), 0);
-  const wertOpen = open.reduce((a, e) => a + (e.vorschlag || 0), 0);
-  const cls = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : '');
-  const pf0 = settings.platforms[settings.platform];
+  const st = book.map((e) => [e, bookStats(e)]);
+  const gewinn = st.reduce((a, [, s]) => a + (s.gone || s.netto ? s.gewinn : 0), 0);
+  const umsatz = st.reduce((a, [, s]) => a + s.umsatz, 0);
+  const salesN = book.reduce((a, e) => a + e.sales.length, 0);
+  const restU = st.reduce((a, [, s]) => a + s.rest, 0);
+  const ekOpen = st.reduce((a, [e, s]) => a + unitEk(e) * s.rest, 0);
+  const wertOpen = st.reduce((a, [e, s]) => a + (e.vorschlag || 0) * s.rest, 0);
+  const sealed = d.typ === 'sealed';
+  const m = d.menge || 1;
+  const ekU = d.ek != null ? d.ek / m : null;
+  const inLot = lot.items.length > 0;
   el.innerHTML = `
     <div class="card">
       <div class="hero">
-        <div class="lbl">Gesamttopf · Gewinn aus ${sold.length} Verkäufen</div>
-        <div class="val ${cls(gewinn)}">${gewinn > 0 ? '+' : ''}${eur(gewinn)}</div>
-        <div class="sub">Umsatz ${eur(umsatz)} · offen ${open.length} Karten, gekauft für ${eur(ekOpen)}, Ziel zusammen ${eur(wertOpen)}</div>
+        <div class="lbl">Gesamttopf · Gewinn aus ${salesN} Verkäufen</div>
+        <div class="val ${clsOf(gewinn)}">${signEur(gewinn)}</div>
+        <div class="sub">Umsatz ${eur(umsatz)} · auf Lager ${restU} Stück, gekauft für ${eur(ekOpen)}, Ziel zusammen ${eur(wertOpen)}</div>
       </div>
     </div>
-    ${lotHtml(cls)}
+    ${lotHtml()}
     <div class="card">
-      <h2>${lot.items.length ? 'Weitere Karte zum Sammelkauf' : 'Neu angekauft'}</h2>
+      <h2>${inLot ? 'Weitere Position zum Sammelkauf' : 'Neu angekauft'}</h2>
+      <div class="seg" id="b-typ"><button type="button" data-t="karte" class="${sealed ? '' : 'on'}">Einzelkarte</button><button type="button" data-t="sealed" class="${sealed ? 'on' : ''}">Sealed / OVP</button></div>
       <form id="book-form" class="book-form" autocomplete="off">
-        <label class="wide ac-wrap">Karte<input id="b-name" value="${esc(d.name)}" placeholder="Tippen, z. B. Glurak ex" required />
+        <label class="wide ac-wrap">${sealed ? 'Produkt' : 'Karte'}<input id="b-name" value="${esc(d.name)}" placeholder="${sealed ? 'z. B. Starter Deck Skeledirge ex SVEL JP' : 'Tippen, z. B. Glurak ex'}" required />
           <div id="b-ac" class="ac-list hidden"></div></label>
-        ${d.cardId ? `<div class="wide picked">${d.image ? img(d.image, 'low', d.name) : ''}<span>${esc(d.match || '')}</span><button type="button" class="x" id="b-unpick" aria-label="Auswahl lösen">×</button></div>` : ''}
-        <label>Nummer<input id="b-nr" value="${esc(d.nr)}" placeholder="006/165" /></label>
-        <label>Note / Zustand<input id="b-note" list="b-notes" value="${esc(d.note)}" placeholder="NM, LP, PSA 10 …" /></label>
+        ${!sealed && d.cardId ? `<div class="wide picked">${d.image ? img(d.image, 'low', d.name) : ''}<span>${esc(d.match || '')}</span><button type="button" class="x" id="b-unpick" aria-label="Auswahl lösen">×</button></div>` : ''}
+        ${sealed ? '' : `<label>Nummer<input id="b-nr" value="${esc(d.nr)}" placeholder="006/165" /></label>`}
+        <label>${sealed ? 'Zustand' : 'Note / Zustand'}<input id="b-note" list="${sealed ? 'b-sealed' : 'b-notes'}" value="${esc(d.note)}" /></label>
         <datalist id="b-notes">${NOTE_LIST.map((x) => `<option value="${x}">`).join('')}</datalist>
+        <datalist id="b-sealed">${SEALED_LIST.map((x) => `<option value="${x}">`).join('')}</datalist>
         <label>Sprache${langSel('b-lang', d.lang)}</label>
-        <label>Gekauft für €<input id="b-ek" inputmode="decimal" value="${d.ek != null ? n2(d.ek) : ''}" placeholder="${lot.items.length ? 'über Gesamtpreis' : 'z. B. 20'}" /></label>
-        <label class="wide">Verkaufspreis € <span class="meta">${d.manual ? '(von dir angepasst)' : '(Vorschlag, anpassbar)'}</span>
+        <label>Menge<input id="b-menge" inputmode="numeric" value="${m}" /></label>
+        <label class="${sealed ? '' : 'wide'}">Gekauft für €${m > 1 ? ' (alle zusammen)' : ''}<input id="b-ek" inputmode="decimal" value="${d.ek != null ? n2(d.ek) : ''}" placeholder="${inLot ? 'leer = über Gesamt-/Paketpreis' : 'z. B. 40'}" /></label>
+        <label class="wide">Marktwert${m > 1 ? ' je Stück' : ''} € <span class="meta">${sealed ? '(auch Spanne, z. B. 8-18)' : '(leer = automatisch)'}</span><input id="b-market" inputmode="text" value="${esc(d.marketIn || '')}" placeholder="${sealed ? '8-18' : d.market != null ? n2(d.market) + ' automatisch' : 'automatisch'}" /></label>
+        <label class="wide">Verkaufspreis${m > 1 ? ' je Stück' : ''} € <span class="meta">${d.manual ? '(von dir angepasst)' : '(Vorschlag, anpassbar)'}</span>
           <span class="inline"><input id="b-vk" inputmode="decimal" value="${d.vorschlag != null ? n2(d.vorschlag) : ''}" placeholder="wird berechnet" /><button type="button" id="b-calc">Berechnen</button></span></label>
-        <p class="date wide" id="b-info">${esc(d.vorschlagInfo || '')}${d.hinweis ? ' · ' + esc(d.hinweis) : ''}${d.vorschlag != null && d.ek != null ? ` · erwarteter Gewinn <b class="${cls(bookProfit(d, d.vorschlag, pf0.versand).gewinn)}">${eur(bookProfit(d, d.vorschlag, pf0.versand).gewinn)}</b>` : ''}</p>
-        <label class="wide">Notiz<input id="b-notiz" value="${esc(d.notiz)}" placeholder="optional, z. B. Laden XY, leichte Weißung" /></label>
-        <label class="btn wide">Foto hinzufügen${d.photo ? ' ✓' : ''}<input id="b-photo" type="file" accept="image/*" hidden /></label>
-        ${lot.items.length ? '' : '<button class="primary wide" type="submit">In die Bibliothek</button>'}
-        <button type="button" class="wide" id="b-lotadd">${lot.items.length ? 'Zum Sammelkauf hinzufügen' : '+ Weitere Karte zu diesem Kauf'}</button>
+        <p class="date wide" id="b-info">${esc(d.vorschlagInfo || '')}${d.hinweis ? ' · ' + esc(d.hinweis) : ''}${d.vorschlag != null && ekU != null ? ` · erwarteter Gewinn <b class="${clsOf(expProfit(ekU, d.vorschlag))}">${eur(expProfit(ekU, d.vorschlag) * m)}</b>${m > 1 ? ` (${eur(ekU)} bezahlt je Stück)` : ''}` : ''}</p>
+        <label class="wide">Notiz<input id="b-notiz" value="${esc(d.notiz)}" placeholder="optional, z. B. Laden XY" /></label>
+        <label class="btn">Foto${d.photo ? ' ✓' : ''}<input id="b-photo" type="file" accept="image/*" hidden /></label>
+        <a class="btn" href="${cmLink(d.name)}" target="_blank" rel="noopener">Bei Cardmarket ansehen</a>
+        ${inLot ? '' : '<button class="primary wide" type="submit">In die Bibliothek</button>'}
+        <button type="button" class="wide ${inLot ? 'primary' : ''}" id="b-lotadd">${inLot ? 'Zum Sammelkauf hinzufügen' : '+ Weitere Position zu diesem Kauf'}</button>
       </form>
     </div>
     <div class="card">
       <h2>Bibliothek · ${book.length}</h2>
       <p class="date">Antippen = bearbeiten · nach rechts wischen = verkauft · nach links wischen = löschen</p>
-      ${book.length ? [...open, ...sold].map((e) => bookRowHtml(e, cls)).join('') : '<p class="empty">Noch nichts angekauft.</p>'}
+      ${book.length ? [...st.filter(([, s]) => !s.done), ...st.filter(([, s]) => s.done)].map(([e, s]) => bookRowHtml(e, s)).join('') : '<p class="empty">Noch nichts angekauft.</p>'}
     </div>`;
   bindBookForm(el);
   bindBookRows(el);
   bindLot(el);
 }
 
-function bookRowHtml(e, cls) {
-  const p = e.vk != null ? bookProfit(e) : null;
-  const pf0 = settings.platforms[settings.platform];
+function bookRowHtml(e, s) {
   const editing = bookOpen === e.uid;
-  return `<div class="book-row ${e.vk != null ? 'sold' : ''} ${editing ? 'editing' : ''}" data-uid="${e.uid}">
+  const m = e.menge || 1;
+  const pf0 = settings.platforms[settings.platform];
+  const ekU = unitEk(e);
+  return `<div class="book-row ${s.done ? 'sold' : ''} ${editing ? 'editing' : ''}" data-uid="${e.uid}">
     ${thumbOf(e)}
     <div>
-      <div class="n">${esc(e.name)}${e.nr ? ' <span class="meta">' + esc(e.nr) + '</span>' : ''}</div>
-      <div class="meta">${esc(e.note || '–')} · ${esc(LANG_LABELS[e.lang] || e.lang)} · gekauft ${eur(e.ek)} am ${new Date(e.datum).toLocaleDateString('de-DE')}</div>
-      ${e.vk != null ? `<div class="meta">verkauft für <b>${eur(e.vk)}</b>, Versand ${eur(e.versand ?? 0)} · ${new Date(e.vkDatum).toLocaleDateString('de-DE')}</div>`
-        : `<div class="date">${e.market != null ? `Marktwert ${eur(e.market)} · Stand ${new Date(e.marketAt || e.datum).toLocaleDateString('de-DE')}` : 'kein Marktwert'}${e.manual ? ' · Preis von dir gesetzt' : ''}</div>`}
+      <div class="n">${m > 1 ? `<span class="qty">${m}×</span> ` : ''}${esc(e.name)}${e.nr ? ' <span class="meta">' + esc(e.nr) + '</span>' : ''}</div>
+      <div class="meta">${e.typ === 'sealed' ? 'Sealed · ' : ''}${esc(e.note || '–')} · ${esc(LANG_LABELS[e.lang] || e.lang)} · gekauft ${eur(e.ek)}${m > 1 ? ` (${eur(ekU)}/Stk)` : ''} am ${new Date(e.datum).toLocaleDateString('de-DE')}</div>
+      ${m > 1 || e.opened ? `<div class="meta">Bestand <b>${s.rest}</b> von ${m}${soldN(e) ? ` · ${soldN(e)} verkauft` : ''}${e.opened ? ` · ${e.opened} geöffnet` : ''}</div>` : ''}
+      ${e.sales.length ? `<div class="meta">Verkäufe ${eur(s.umsatz)} · netto ${eur(s.netto)}</div>` : ''}
+      ${!s.done ? `<div class="date">${e.market != null ? `Marktwert ${eur(e.market)}${m > 1 ? '/Stk' : ''} · Stand ${new Date(e.marketAt || e.datum).toLocaleDateString('de-DE')}` : 'kein Marktwert'}${e.manual ? ' · Preis von dir gesetzt' : ''}</div>` : ''}
       ${e.notiz ? `<div class="date">${esc(e.notiz)}</div>` : ''}
     </div>
     <div class="right">
-      ${p ? `<span class="meta">Gewinn</span><b class="${cls(p.gewinn)}">${p.gewinn > 0 ? '+' : ''}${eur(p.gewinn)}</b>`
-        : `<span class="meta">Verkaufen für</span><b>${e.vorschlag != null ? eur(e.vorschlag) : '–'}</b>${e.vorschlag != null && e.ek != null ? `<span class="meta ${cls(bookProfit(e, e.vorschlag, pf0.versand).gewinn)}">~${eur(bookProfit(e, e.vorschlag, pf0.versand).gewinn)}</span>` : ''}`}
+      ${s.done ? `<span class="meta">Gewinn</span><b class="${clsOf(s.gewinn)}">${signEur(s.gewinn)}</b>`
+        : `<span class="meta">Verkaufen für${m > 1 ? '/Stk' : ''}</span><b>${e.vorschlag != null ? eur(e.vorschlag) : '–'}</b>${e.vorschlag != null ? `<span class="meta ${clsOf(expProfit(ekU, e.vorschlag))}">~${eur(expProfit(ekU, e.vorschlag) * s.rest)}</span>` : ''}${s.gone ? `<span class="meta">bisher <b class="${clsOf(s.gewinn)}">${signEur(s.gewinn)}</b></span>` : ''}`}
     </div>
     ${editing ? `<div class="book-edit" data-edit="${e.uid}">
       ${e.photo ? `<img class="book-photo" src="${e.photo}" alt="Foto">` : ''}
       <div class="grid2">
-        <label class="wide2">Karte<input data-f="name" value="${esc(e.name)}" /></label>
-        <label>Nummer<input data-f="nr" value="${esc(e.nr || '')}" /></label>
-        <label>Note<input data-f="note" list="b-notes" value="${esc(e.note || '')}" /></label>
+        <label class="wide2">${e.typ === 'sealed' ? 'Produkt' : 'Karte'}<input data-f="name" value="${esc(e.name)}" /></label>
+        ${e.typ === 'sealed' ? '' : `<label>Nummer<input data-f="nr" value="${esc(e.nr || '')}" /></label>`}
+        <label>${e.typ === 'sealed' ? 'Zustand' : 'Note'}<input data-f="note" list="${e.typ === 'sealed' ? 'b-sealed' : 'b-notes'}" value="${esc(e.note || '')}" /></label>
         <label>Sprache${langSel('lang', e.lang, 'data-f')}</label>
-        <label>Gekauft für €<input data-f="ek" inputmode="decimal" value="${e.ek != null ? n2(e.ek) : ''}" /></label>
-        <label>Verkaufspreis (Ziel) €<input data-f="vorschlag" inputmode="decimal" value="${e.vorschlag != null ? n2(e.vorschlag) : ''}" /></label>
-        ${e.vk != null ? `<label>Verkauft für €<input data-f="vk" inputmode="decimal" value="${n2(e.vk)}" /></label><label>Versand €<input data-f="versand" inputmode="decimal" value="${n2(e.versand ?? 0)}" /></label>` : ''}
+        <label>Menge<input data-f="menge" inputmode="numeric" value="${m}" /></label>
+        <label>Gekauft für € (gesamt)<input data-f="ek" inputmode="decimal" value="${e.ek != null ? n2(e.ek) : ''}" /></label>
+        <label>Marktwert${m > 1 ? '/Stk' : ''} €<input data-f="marketIn" value="${esc(e.marketIn || '')}" placeholder="${e.market != null ? n2(e.market) : 'z. B. 8-18'}" /></label>
+        <label>Verkaufspreis${m > 1 ? '/Stk' : ''} €<input data-f="vorschlag" inputmode="decimal" value="${e.vorschlag != null ? n2(e.vorschlag) : ''}" /></label>
       </div>
       <label>Notiz<input data-f="notiz" value="${esc(e.notiz || '')}" /></label>
       <p class="date">${esc(e.vorschlagInfo || '')}${e.autoVorschlag != null && e.manual ? ` · berechnet wären ${eur(e.autoVorschlag)}` : ''}</p>
+      ${e.sales.length ? `<div class="sales">${e.sales.map((x, i) => `<div class="sale-line"><span>${x.inhalt ? 'Inhalt: ' : ''}${x.n}× ${eur(x.preis)} · Versand ${eur(x.versand || 0)} · ${esc(pfOf(x.pf).label)} · ${new Date(x.datum).toLocaleDateString('de-DE')}</span><b class="${clsOf(saleNetto(x))}">${eur(saleNetto(x))}</b><button class="x" data-saledel="${i}" aria-label="Verkauf löschen">×</button></div>`).join('')}</div>` : ''}
       <div class="grid2">
         <label class="btn">${e.photo ? 'Foto ersetzen' : 'Foto hinzufügen'}<input type="file" accept="image/*" data-photo="${e.uid}" hidden /></label>
         <button data-recalc="${e.uid}">Marktwert neu berechnen</button>
-        ${e.vk == null ? `<button class="primary" data-opensell="${e.uid}">Verkauft …</button>` : `<button data-unsell="${e.uid}">Verkauf zurücknehmen</button>`}
+        ${s.rest > 0 || e.opened ? `<button class="primary" data-opensell="${e.uid}">Verkauf erfassen</button>` : ''}
+        ${s.rest > 0 ? `<button data-open1="${e.uid}">1 Stück geöffnet</button>` : ''}
+        ${e.opened ? `<button data-unopen="${e.uid}">Öffnen zurücknehmen</button>` : ''}
         <button data-close="${e.uid}">Fertig</button>
       </div>
       <div class="sell-sheet hidden" data-sheet="${e.uid}">
         <div class="grid2">
-          <label>Verkauft für €<input data-vk="${e.uid}" inputmode="decimal" value="${e.vorschlag != null ? n2(e.vorschlag) : ''}" /></label>
-          <label>Versand €<input data-vs="${e.uid}" inputmode="decimal" value="${n2(pf0.versand)}" /></label>
+          <label>Anzahl<input data-vn="${e.uid}" inputmode="numeric" value="1" /></label>
+          <label>Preis je Stück €<input data-vk="${e.uid}" inputmode="decimal" value="${e.vorschlag != null ? n2(e.vorschlag) : ''}" /></label>
+          <label>Versand gesamt €<input data-vs="${e.uid}" inputmode="decimal" value="${n2(pf0.versand)}" /></label>
+          <label>Über<select data-vp="${e.uid}">${Object.entries(settings.platforms).map(([k, x]) => `<option value="${k}" ${k === settings.platform ? 'selected' : ''}>${esc(x.label)} (${fmt1(x.provision * 100)} %)</option>`).join('')}</select></label>
         </div>
-        <label>Über<select data-vp="${e.uid}">${Object.entries(settings.platforms).map(([k, x]) => `<option value="${k}" ${k === settings.platform ? 'selected' : ''}>${esc(x.label)} (${fmt1(x.provision * 100)} %)</option>`).join('')}</select></label>
-        <button class="primary block" data-sell="${e.uid}">Als verkauft speichern</button>
+        ${e.opened ? `<label class="check"><input type="checkbox" data-vi="${e.uid}" ${s.rest === 0 ? 'checked' : ''} /> Einzelverkauf aus geöffnetem Inhalt (Bestand bleibt)</label>` : ''}
+        <button class="primary block" data-sell="${e.uid}">Verkauf speichern</button>
       </div>
     </div>` : ''}
   </div>`;
@@ -1923,14 +2028,24 @@ function bindBookForm(el) {
   const d = draft;
   const nameIn = $('#b-name', el), ac = $('#b-ac', el);
   let t = null, seq = 0;
+  const val = (sel) => { const x = $(sel, el); return x ? x.value.trim() : ''; };
   const readForm = () => {
-    d.name = nameIn.value.trim(); d.nr = $('#b-nr', el).value.trim(); d.note = $('#b-note', el).value.trim();
-    d.lang = $('#b-lang', el).value; d.ek = parseNum($('#b-ek', el).value); d.notiz = $('#b-notiz', el).value.trim();
-    const vk = parseNum($('#b-vk', el).value);
-    if (vk != null && vk !== d.vorschlag) { d.vorschlag = vk; d.manual = true; }
+    d.name = nameIn.value.trim(); d.nr = val('#b-nr'); d.note = val('#b-note');
+    d.lang = $('#b-lang', el).value; d.ek = parseNum(val('#b-ek')); d.notiz = val('#b-notiz');
+    d.menge = Math.max(1, parseInt(val('#b-menge'), 10) || 1);
+    d.marketIn = val('#b-market');
+    const vk = parseNum(val('#b-vk'));
+    if (vk !== d.vorschlag) { d.vorschlag = vk; d.manual = vk != null; }
   };
+  $$('#b-typ [data-t]', el).forEach((b) => b.addEventListener('click', () => {
+    if (b.dataset.t === d.typ) return;
+    readForm();
+    draft = { ...newDraft(b.dataset.t), lang: d.lang, menge: d.menge, ek: d.ek, notiz: d.notiz };
+    renderBook();
+  }));
   nameIn.addEventListener('input', () => {
     clearTimeout(t);
+    if (d.typ === 'sealed') return;
     if (d.cardId) { d.cardId = null; d.match = ''; d.image = null; }
     const q = nameIn.value.trim();
     if (q.length < 2) { ac.classList.add('hidden'); return; }
@@ -1958,11 +2073,10 @@ function bindBookForm(el) {
   nameIn.addEventListener('blur', () => setTimeout(() => ac.classList.add('hidden'), 150));
   const unpick = $('#b-unpick', el);
   if (unpick) unpick.addEventListener('click', () => { readForm(); Object.assign(d, { cardId: null, match: '', image: null, market: null }); renderBook(); });
-  $('#b-vk', el).addEventListener('input', () => { d.manual = true; });
-  ['#b-note', '#b-lang', '#b-ek'].forEach((sel) => $(sel, el).addEventListener('change', async () => {
+  ['#b-note', '#b-lang', '#b-ek', '#b-menge', '#b-market'].forEach((sel) => { const x = $(sel, el); if (x) x.addEventListener('change', async () => {
     readForm();
-    if (d.cardId || d.name) { await suggestPrice(d); renderBook(); }
-  }));
+    if (d.cardId || d.name || d.marketIn) { await suggestPrice(d); renderBook(); }
+  }); });
   $('#b-calc', el).addEventListener('click', async () => {
     readForm(); d.manual = false;
     $('#b-info').textContent = 'Berechne …';
@@ -1975,34 +2089,35 @@ function bindBookForm(el) {
   });
   $('#b-lotadd', el).addEventListener('click', async () => {
     readForm();
-    if (!d.name) return toast('Karte eintragen');
-    if (d.market == null && !d.manual) await suggestPrice(d);
-    if (!lot.items.length && d.ek != null) lot.total = d.ek;
-    lot.items.push({ ...d });
+    if (!d.name) return toast('Karte oder Produkt eintragen');
+    if (d.market == null || !d.manual) await suggestPrice(d);
+    const x = { ...d };
+    if (d.ek != null) { const g = uid(); lot.groups[g] = d.ek; x.grp = g; }
+    lot.items.push(x);
     saveLot();
-    draft = { ...newDraft(), lang: d.lang };
+    draft = { ...newDraft(d.typ), lang: d.lang };
     renderBook();
-    toast(`${lot.items.length} Karten im Sammelkauf`);
+    toast(`${lot.items.length} Positionen im Sammelkauf`);
     $('#b-name').focus();
   });
   $('#book-form', el).addEventListener('submit', async (ev) => {
     ev.preventDefault();
     readForm();
-    if (!d.name || d.ek == null) return toast('Karte und Einkaufspreis eintragen');
+    if (!d.name || d.ek == null) return toast('Name und Einkaufspreis eintragen');
     if (d.vorschlag == null || (!d.manual && d.market == null)) await suggestPrice(d);
-    const e = { ...d, uid: uid(), datum: Date.now(), vk: null };
+    const e = migrateEntry({ ...d, uid: uid(), datum: Date.now(), sales: [], opened: 0 });
     book.unshift(e);
     saveBook();
-    draft = newDraft();
+    draft = newDraft(d.typ);
     renderBook();
-    toast(e.vorschlag != null ? `Gespeichert · verkaufen für ${eur(e.vorschlag)}` : 'Gespeichert');
+    toast(e.vorschlag != null ? `Gespeichert · verkaufen für ${eur(e.vorschlag)}${e.menge > 1 ? ' je Stück' : ''}` : 'Gespeichert');
     $('#b-name').focus();
   });
 }
 
 function bindBookRows(el) {
   const find = (u) => book.find((x) => x.uid === u);
-  // Antippen = bearbeiten (nicht auf Eingaben/Knöpfe)
+  const done = (msg) => { saveBook(); renderBook(); if (msg) toast(msg); };
   $$('.book-row', el).forEach((row) => row.addEventListener('click', (ev) => {
     if (ev.target.closest('.book-edit') || row.dataset.swiped) { delete row.dataset.swiped; return; }
     bookOpen = bookOpen === row.dataset.uid ? null : row.dataset.uid;
@@ -2010,40 +2125,50 @@ function bindBookRows(el) {
   }));
   $$('.book-edit [data-f]', el).forEach((inp) => inp.addEventListener('change', async () => {
     const e = find(inp.closest('[data-edit]').dataset.edit), f = inp.dataset.f;
-    const num = ['ek', 'vorschlag', 'vk', 'versand'].includes(f);
-    e[f] = num ? parseNum(inp.value) : inp.value.trim();
-    if (f === 'vorschlag') e.manual = true;
-    if (['note', 'lang', 'name', 'nr'].includes(f)) { if (f === 'name' || f === 'nr') { e.cardId = null; e.match = ''; } await suggestPrice(e); }
-    saveBook(); renderBook();
+    if (f === 'menge') e.menge = Math.max(soldN(e) + e.opened, 1, parseInt(inp.value, 10) || 1);
+    else if (['ek', 'vorschlag'].includes(f)) e[f] = parseNum(inp.value);
+    else e[f] = inp.value.trim();
+    if (f === 'vorschlag') e.manual = e.vorschlag != null;
+    if (f === 'name' || f === 'nr') { e.cardId = null; e.match = ''; }
+    if (['note', 'lang', 'name', 'nr', 'marketIn', 'ek', 'menge'].includes(f)) await suggestPrice(e);
+    done();
   }));
   $$('[data-photo]', el).forEach((inp) => inp.addEventListener('change', async (ev) => {
     const f = ev.target.files && ev.target.files[0];
     if (!f) return;
-    const e = find(inp.dataset.photo); e.photo = await photoToData(f); saveBook(); renderBook(); toast('Foto gespeichert');
+    const e = find(inp.dataset.photo); e.photo = await photoToData(f); done('Foto gespeichert');
   }));
   $$('[data-recalc]', el).forEach((b) => b.addEventListener('click', async () => {
     const e = find(b.dataset.recalc); b.textContent = 'Berechne …';
     const keep = e.manual;
     await suggestPrice(e);
-    if (keep && confirm(`Neuer Vorschlag ${eur(e.autoVorschlag)} übernehmen? (Bisher von dir: ${eur(e.vorschlag)})`)) { e.vorschlag = e.autoVorschlag; e.manual = false; }
-    saveBook(); renderBook();
+    if (keep && e.autoVorschlag != null && confirm(`Neuen Vorschlag ${eur(e.autoVorschlag)} übernehmen? (Bisher von dir: ${eur(e.vorschlag)})`)) { e.vorschlag = e.autoVorschlag; e.manual = false; }
+    done();
   }));
+  $$('[data-saledel]', el).forEach((b) => b.addEventListener('click', () => { const e = find(b.closest('[data-edit]').dataset.edit); e.sales.splice(+b.dataset.saledel, 1); done(); }));
+  $$('[data-open1]', el).forEach((b) => b.addEventListener('click', () => { const e = find(b.dataset.open1); if (restOf(e) > 0) e.opened++; done('1 Stück als geöffnet markiert, Inhalt kannst du einzeln verkaufen'); }));
+  $$('[data-unopen]', el).forEach((b) => b.addEventListener('click', () => { const e = find(b.dataset.unopen); e.opened = Math.max(0, e.opened - 1); done(); }));
   $$('[data-close]', el).forEach((b) => b.addEventListener('click', () => { bookOpen = null; renderBook(); }));
   $$('[data-opensell]', el).forEach((b) => b.addEventListener('click', () => openSheet(el, b.dataset.opensell)));
-  $$('[data-unsell]', el).forEach((b) => b.addEventListener('click', () => { const e = find(b.dataset.unsell); e.vk = null; e.vkDatum = null; saveBook(); renderBook(); }));
   $$('[data-sell]', el).forEach((b) => b.addEventListener('click', () => {
     const u = b.dataset.sell, e = find(u);
-    const vk = parseNum($(`[data-vk="${u}"]`, el).value);
-    if (vk == null || vk < 0) return toast('Verkaufspreis eintragen');
-    e.vk = vk; e.versand = parseNum($(`[data-vs="${u}"]`, el).value) ?? 0; e.vkPlattform = $(`[data-vp="${u}"]`, el).value; e.vkDatum = Date.now();
-    saveBook();
-    const g = bookProfit(e).gewinn;
+    const preis = parseNum($(`[data-vk="${u}"]`, el).value);
+    if (preis == null || preis < 0) return toast('Preis eintragen');
+    const inh = $(`[data-vi="${u}"]`, el);
+    const inhalt = !!(inh && inh.checked);
+    let n = Math.max(1, parseInt($(`[data-vn="${u}"]`, el).value, 10) || 1);
+    if (!inhalt) {
+      const r = restOf(e);
+      if (r <= 0) return toast('Kein Bestand mehr, Inhalt-Verkauf anhaken');
+      n = Math.min(n, r);
+    }
+    const before = bookStats(e).gewinn;
+    e.sales.push({ n, preis, versand: parseNum($(`[data-vs="${u}"]`, el).value) ?? 0, pf: $(`[data-vp="${u}"]`, el).value, datum: Date.now(), ...(inhalt ? { inhalt: true } : {}) });
+    const s = bookStats(e);
     if (navigator.vibrate) navigator.vibrate(40);
-    bookOpen = null;
-    renderBook();
-    toast(`Verkauft · Gewinn ${g > 0 ? '+' : ''}${eur(g)}`);
+    if (s.done && !e.opened) bookOpen = null;
+    done(s.done ? `Ausverkauft · Gewinn ${signEur(s.gewinn)}` : `Verkauft · ${signEur(s.gewinn - before)} · noch ${s.rest} auf Lager`);
   }));
-  // Wischen: rechts = verkauft (öffnet Bearbeitung mit Verkaufsfeld), links = löschen
   $$('.book-row', el).forEach((row) => {
     let sx = 0, sy = 0, dx = 0, active = false, decided = false;
     row.addEventListener('touchstart', (e) => {
@@ -2092,7 +2217,7 @@ function bindBookRows(el) {
 }
 function openSheet(el, u) {
   const s = $(`[data-sheet="${u}"]`, el);
-  if (s) { s.classList.remove('hidden'); const i = s.querySelector('input'); if (i) i.focus(); }
+  if (s) { s.classList.remove('hidden'); const i = s.querySelector('[data-vk]'); if (i) i.focus(); }
 }
 
 // ---------- Bestand ----------
