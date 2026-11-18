@@ -509,3 +509,50 @@ label.check input { width: 18px; height: 18px; min-height: 0; }
 .grade-chips { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
 .grade-chips button { min-height: 32px; padding: 0 10px; font-size: 13px; border-radius: 16px; white-space: nowrap; flex: none; }
 .grade-chips button.on { background: var(--strong); color: var(--bg); }
+
+/* Trade + Auswahl */
+.book-tabs { margin-top: 0; }
+.lib-head { display: flex; justify-content: space-between; align-items: center; }
+.lib-head .small { min-height: 32px; padding: 0 12px; font-size: 13px; }
+.lib-sel { position: sticky; top: 64px; z-index: 5; background: var(--sunken); border-radius: 12px; padding: 10px; margin: 6px 0 4px; display: grid; gap: 8px; }
+.lib-sel-btns { display: grid; grid-template-columns: 1fr 1fr 1.3fr 1fr; gap: 6px; }
+.lib-sel-btns button { min-height: 34px; padding: 0 6px; font-size: 13px; }
+.thumb-wrap { position: relative; width: 44px; }
+.row-check { position: absolute; top: -6px; left: -6px; width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--line); background: var(--bg); }
+.row-check.on { background: var(--strong); border-color: var(--strong); }
+.row-check.on::after { content: ""; position: absolute; left: 6px; top: 2px; width: 5px; height: 10px; border: solid var(--bg); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.book-row.picked-row { background: var(--sunken); }
+.book-row.selmode::before, .book-row.selmode::after { display: none; }
+.trade-viz { overflow: hidden; }
+.trade-cols { display: grid; grid-template-columns: 1fr 36px 1fr; align-items: center; gap: 6px; }
+.trade-side { display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center; }
+.trade-side b { font-size: 22px; font-variant-numeric: tabular-nums; }
+.trade-arrow { color: var(--muted); display: flex; justify-content: center; }
+.stack { position: relative; height: 112px; width: 100%; display: flex; justify-content: center; margin: 6px 0; }
+.stack-card { position: absolute; width: 72px; transform: translateX(calc((var(--i) - 1) * 14px)) rotate(calc((var(--i) - 1) * 5deg)); transform-origin: bottom center; }
+.stack-card img, .stack-card .thumb-ph { width: 72px; border-radius: 5px; box-shadow: 0 4px 12px rgba(0,0,0,.18); background: var(--bg); }
+.stack-card.empty { height: 100px; border: 2px dashed var(--line); border-radius: 6px; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+.balance { height: 8px; background: var(--sunken); border-radius: 4px; margin-top: 10px; overflow: hidden; }
+.bal { height: 100%; border-radius: 4px; transition: width .3s ease; }
+.bal.give { background: var(--muted); }
+.bal.get.pos { background: var(--pos); } .bal.get.neg { background: var(--neg); }
+.trade-verdict { text-align: center; font-weight: 600; margin-top: 12px; font-size: 16px; }
+.center { text-align: center; }
+.trade-row { display: grid; grid-template-columns: 40px 1fr 76px 28px; gap: 8px; align-items: start; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.trade-row.get { grid-template-columns: 40px 1fr 28px; }
+.trade-row img, .trade-row .thumb-ph { width: 40px; border-radius: 4px; }
+.trade-row .x { min-height: 28px; width: 28px; padding: 0; background: transparent; }
+.pick-list { max-height: 340px; overflow-y: auto; margin-top: 8px; border: 1px solid var(--line); border-radius: 12px; }
+.pick-item { display: grid; grid-template-columns: 22px 32px 1fr auto; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 14px; }
+.pick-item input { width: 20px; height: 20px; min-height: 0; }
+.pick-item img, .pick-item .thumb-ph { width: 32px; border-radius: 3px; }
+
+.modal-ov { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 1000; display: flex; align-items: flex-end; animation: fadein .15s ease; }
+.modal { background: var(--bg); width: 100%; border-radius: 20px 20px 0 0; padding: 18px 16px calc(18px + env(safe-area-inset-bottom)); display: grid; gap: 10px; animation: slideup .22s ease; max-width: 640px; margin: 0 auto; }
+.modal-head { display: grid; grid-template-columns: 44px 1fr; gap: 12px; align-items: center; }
+.modal-head img, .modal-head .thumb-ph { width: 44px; border-radius: 4px; }
+.modal .wide2 { grid-column: 1 / -1; }
+.modal #m-vk { font-size: 22px; font-weight: 600; }
+.m-res { margin: 0; font-size: 15px; }
+@keyframes slideup { from { transform: translateY(100%); } to { transform: none; } }
+@keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
