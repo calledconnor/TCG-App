@@ -1730,6 +1730,7 @@ function parseRange(v) {
   const n = parseNum(v);
   return n != null ? { mid: n, min: null, max: null } : null;
 }
+const gradeOf = (note) => { const m = String(note || '').match(/^\s*(PSA|BGS|CGC|SGC)\s*(\d+(?:[.,]5)?)/i); return m ? { company: m[1].toUpperCase(), grade: m[2].replace(',', '.') } : null; };
 const cmLink = (name) => `https://www.cardmarket.com/de/Pokemon/Products/Search?searchString=${encodeURIComponent(name || '')}`;
 
 /** Marktwert je Stück + Verkaufsvorschlag je Stück. Eigener Marktwert (auch Spanne 8-18) hat Vorrang, sonst TCGdex. Manuellen Preis nie überschreiben. */
@@ -1738,6 +1739,9 @@ async function suggestPrice(e) {
   const ekU = e.ek != null ? e.ek / (e.menge || 1) : null;
   const target = ekU != null ? minPrice(ekU) : null;
   let market = null, note = '', range = '';
+  const my = (e._seq = (e._seq || 0) + 1);
+  const gr = gradeOf(e.note);
+  e.rawMarket = null; e.gradedSrc = '';
   const own = parseRange(e.marketIn);
   if (own) {
     market = own.mid;
@@ -1755,24 +1759,38 @@ async function suggestPrice(e) {
           const base = combine(marketSources(extractPricing(r.data), null, []));
           const cond = NOTE_COND[(e.note || '').toUpperCase()] || 'NM';
           const sp = settings.lf[e.lang] != null ? e.lang : 'en';
-          if (base != null) market = marktwert({ referenz: base, cf: settings.cf, lf: settings.lf, zustand: cond, sprache: sp, refZustand: 'NM', refSprache: 'en' });
+          const raw = base != null ? marktwert({ referenz: base, cf: settings.cf, lf: settings.lf, zustand: gr ? 'NM' : cond, sprache: sp, refZustand: 'NM', refSprache: 'en' }) : null;
           e.cardId = id; e.cardLang = lang;
           e.image = e.image || r.data.image || null;
           e.match = e.match || `${r.data.name} · ${r.data.set?.name || ''} ${r.data.localId}`;
-          if (/^(PSA|BGS|CGC|SGC)/i.test(e.note || '')) note = 'Gegradet: Marktwert gilt ungegradet, Graded-Preis über „Bewerten“ prüfen oder Marktwert selbst eintragen.';
+          if (!gr) market = raw;
+          else {
+            e.rawMarket = raw;
+            // echte Verkaufspreise je Note (Pokemon Price Tracker), nur mit Schlüssel oder aus dem Cache
+            try {
+              const pr = extractPricing(r.data);
+              const q = `${r.data.name} ${r.data.localId}${r.data.set?.cardCount?.official ? '/' + r.data.set.cardCount.official : ''}`;
+              const g = await gradedPrices({ tcgIds: pr.tcgIds, query: q, apiKey: settings.pptKey || '', cacheOnly: !settings.pptKey });
+              const hit = g.status === 'ok' && g.data.grades.find((x) => x.company === gr.company && parseFloat(x.grade) === parseFloat(gr.grade));
+              const usd = hit ? hit.smart ?? hit.median ?? hit.avg : null;
+              if (usd != null && fx?.rate) { market = usd * fx.rate; e.gradedSrc = `eBay-Verkäufe ${gr.company} ${gr.grade}${hit.count ? ' (' + hit.count + ')' : ''}`; }
+            } catch {}
+            if (market == null) note = `${gr.company} ${gr.grade}: kein Graded-Preis gefunden, bitte Verkaufspreis für ${gr.company} ${gr.grade} als Marktwert eintragen${raw != null ? ` (roh wäre ${eur(raw)})` : ''}.`;
+          }
         }
       }
     } catch {}
   }
+  if (e._seq !== my) return e; // neuere Berechnung läuft schon (z. B. Note geändert)
   e.market = market;
   e.marketAt = Date.now();
-  const auto = market != null ? roundPrice(market * (1 - cfg.undercut)) : target;
+  const auto = market != null ? roundPrice(market * (1 - cfg.undercut)) : gr ? null : target;
   if (!e.manual) e.vorschlag = auto;
   e.autoVorschlag = auto;
   const per = (e.menge || 1) > 1 ? ' je Stück' : '';
   e.vorschlagInfo = market != null
-    ? `Marktwert${per} ${range}${eur(market)}${e.match && !own ? ' (' + e.match + ')' : ''} · Vorschlag ${fmt1(cfg.undercut * 100)} % darunter${target != null ? ` · mind. ${eur(target)} für ${fmt1(cfg.marge * 100)} % Marge` : ''}`
-    : target != null ? `Kein Marktwert, Mindestpreis${per} für ${fmt1(cfg.marge * 100)} % Marge: ${eur(target)}` : (e.typ === 'sealed' ? 'Marktwert je Stück eintragen, z. B. 8-18' : '');
+    ? `${gr ? gr.company + ' ' + gr.grade + ' · ' : ''}Marktwert${per} ${range}${eur(market)}${e.gradedSrc ? ' aus ' + e.gradedSrc : e.match && !own ? ' (' + e.match + ')' : ''}${e.rawMarket != null ? ` · roh ${eur(e.rawMarket)}` : ''} · Vorschlag ${fmt1(cfg.undercut * 100)} % darunter${target != null ? ` · mind. ${eur(target)} für ${fmt1(cfg.marge * 100)} % Marge` : ''}`
+    : gr ? (target != null ? `Mindestpreis für ${fmt1(cfg.marge * 100)} % Marge: ${eur(target)}` : '') : target != null ? `Kein Marktwert, Mindestpreis${per} für ${fmt1(cfg.marge * 100)} % Marge: ${eur(target)}` : (e.typ === 'sealed' ? 'Marktwert je Stück eintragen, z. B. 8-18' : '');
   e.hinweis = note;
   return e;
 }
@@ -1805,7 +1823,10 @@ function cleanGroups() {
 /** Paketpreise gehen an ihre Karten, der Rest vom Gesamtpreis wird nach Marktwert × Menge verteilt. */
 function lotCalc() {
   const items = lot.items, cfg = flipCfg();
-  const w = items.map((x) => (x.market ?? x.autoVorschlag ?? x.vorschlag ?? 0) * (x.menge || 1));
+  const w0 = items.map((x) => x.market ?? x.rawMarket ?? x.autoVorschlag ?? x.vorschlag ?? null);
+  const known = w0.filter((v) => v != null && v > 0);
+  const avgW = known.length ? known.reduce((a, v) => a + v, 0) / known.length : 1;
+  const w = items.map((x, i) => (w0[i] != null && w0[i] > 0 ? w0[i] : avgW) * (x.menge || 1));
   const idx = items.map((_, i) => i);
   const grpSum = Object.values(lot.groups).reduce((a, b) => a + (b || 0), 0);
   const free = idx.filter((i) => !items[i].grp);
@@ -1850,7 +1871,12 @@ function lotHtml() {
       <input type="checkbox" data-lotsel="${r.i}" ${lotSel.has(r.i) ? 'checked' : ''} aria-label="Auswählen" />
       <div class="lot-main">
         <div class="n">${r.m > 1 ? `<span class="qty">${r.m}×</span> ` : ''}${esc(r.x.name)}${r.x.nr ? ' <span class="meta">' + esc(r.x.nr) + '</span>' : ''}</div>
-        <div class="meta">${r.x.typ === 'sealed' ? 'Sealed · ' : ''}${esc(r.x.note || '–')}${r.x.grp ? ` · <span class="grp-badge">${grpName(r.x.grp)}</span>` : ''}</div>
+        <div class="meta">${r.x.typ === 'sealed' ? 'Sealed · ' : ''}${gradeOf(r.x.note) ? `<span class="grade-badge">${esc(r.x.note)}</span>` : esc(r.x.note || '–')}${r.x.grp ? ` · <span class="grp-badge">${grpName(r.x.grp)}</span>` : ''}</div>
+        <div class="lot-edit">
+          <label>Zustand / Grading<input data-lotnote="${r.i}" list="${r.x.typ === 'sealed' ? 'b-sealed' : 'b-notes'}" value="${esc(r.x.note || '')}" placeholder="NM, PSA 9 …" /></label>
+          <label>Marktwert${r.m > 1 ? '/Stk' : ''} €<input data-lotmk="${r.i}" inputmode="text" value="${esc(r.x.marketIn || '')}" placeholder="${r.x.market != null ? n2(r.x.market) : gradeOf(r.x.note) ? 'PSA-Preis' : 'eintragen'}" /></label>
+        </div>
+        ${r.x.hinweis ? `<div class="date warn-soft">${esc(r.x.hinweis)}</div>` : r.x.gradedSrc ? `<div class="date">aus ${esc(r.x.gradedSrc)}${r.x.rawMarket != null ? ' · roh ' + eur(r.x.rawMarket) : ''}</div>` : ''}
         <div class="lot-nums">
           <span>Markt<b>${r.x.market != null ? eur(r.x.market) : '–'}</b></span>
           <span>bezahlt${r.m > 1 ? '/Stk' : ''}<b>${r.ekU != null ? eur(r.ekU) : '–'}</b></span>
@@ -1876,6 +1902,9 @@ function bindLot(el) {
   if (!t) return;
   t.addEventListener('change', () => { lot.total = parseNum(t.value); saveLot(); renderBook(); });
   $$('[data-lotvk]', el).forEach((inp) => inp.addEventListener('change', () => { const x = lot.items[+inp.dataset.lotvk]; x.vorschlag = parseNum(inp.value); x.manual = x.vorschlag != null; saveLot(); renderBook(); }));
+  const relot = async (x) => { await suggestPrice(x); saveLot(); renderBook(); };
+  $$('[data-lotnote]', el).forEach((inp) => inp.addEventListener('change', () => { const x = lot.items[+inp.dataset.lotnote]; x.note = inp.value.trim(); if (gradeOf(x.note)) x.manual = false; relot(x); }));
+  $$('[data-lotmk]', el).forEach((inp) => inp.addEventListener('change', () => { const x = lot.items[+inp.dataset.lotmk]; x.marketIn = inp.value.trim(); x.manual = false; relot(x); }));
   $$('[data-lotsel]', el).forEach((cb) => cb.addEventListener('change', () => { const i = +cb.dataset.lotsel; cb.checked ? lotSel.add(i) : lotSel.delete(i); renderBook(); }));
   $$('[data-lotdel]', el).forEach((b) => b.addEventListener('click', () => { lot.items.splice(+b.dataset.lotdel, 1); lotSel.clear(); cleanGroups(); saveLot(); renderBook(); }));
   $$('[data-grpdel]', el).forEach((b) => b.addEventListener('click', () => { const g = b.dataset.grpdel; lot.items.forEach((x) => { if (x.grp === g) delete x.grp; }); delete lot.groups[g]; saveLot(); renderBook(); }));
@@ -1944,13 +1973,14 @@ function renderBook() {
         <label>${sealed ? 'Zustand' : 'Note / Zustand'}<input id="b-note" list="${sealed ? 'b-sealed' : 'b-notes'}" value="${esc(d.note)}" /></label>
         <datalist id="b-notes">${NOTE_LIST.map((x) => `<option value="${x}">`).join('')}</datalist>
         <datalist id="b-sealed">${SEALED_LIST.map((x) => `<option value="${x}">`).join('')}</datalist>
+        ${sealed ? '' : `<div class="wide grade-chips">${['Roh', 'PSA 10', 'PSA 9', 'PSA 8', 'CGC 10', 'CGC 9.5', 'BGS 9.5'].map((g) => `<button type="button" data-gq="${g}" class="${(g === 'Roh' ? !gradeOf(d.note) : d.note === g) ? 'on' : ''}">${g}</button>`).join('')}</div>`}
         <label>Sprache${langSel('b-lang', d.lang)}</label>
         <label>Menge<input id="b-menge" inputmode="numeric" value="${m}" /></label>
         <label class="${sealed ? '' : 'wide'}">Gekauft für €${m > 1 ? ' (alle zusammen)' : ''}<input id="b-ek" inputmode="decimal" value="${d.ek != null ? n2(d.ek) : ''}" placeholder="${inLot ? 'leer = über Gesamt-/Paketpreis' : 'z. B. 40'}" /></label>
         <label class="wide">Marktwert${m > 1 ? ' je Stück' : ''} € <span class="meta">${sealed ? '(auch Spanne, z. B. 8-18)' : '(leer = automatisch)'}</span><input id="b-market" inputmode="text" value="${esc(d.marketIn || '')}" placeholder="${sealed ? '8-18' : d.market != null ? n2(d.market) + ' automatisch' : 'automatisch'}" /></label>
         <label class="wide">Verkaufspreis${m > 1 ? ' je Stück' : ''} € <span class="meta">${d.manual ? '(von dir angepasst)' : '(Vorschlag, anpassbar)'}</span>
           <span class="inline"><input id="b-vk" inputmode="decimal" value="${d.vorschlag != null ? n2(d.vorschlag) : ''}" placeholder="wird berechnet" /><button type="button" id="b-calc">Berechnen</button></span></label>
-        <p class="date wide" id="b-info">${esc(d.vorschlagInfo || '')}${d.hinweis ? ' · ' + esc(d.hinweis) : ''}${d.vorschlag != null && ekU != null ? ` · erwarteter Gewinn <b class="${clsOf(expProfit(ekU, d.vorschlag))}">${eur(expProfit(ekU, d.vorschlag) * m)}</b>${m > 1 ? ` (${eur(ekU)} bezahlt je Stück)` : ''}` : ''}</p>
+        <p class="date wide" id="b-info">${esc(d.vorschlagInfo || '')}${d.hinweis ? (d.vorschlagInfo ? ' · ' : '') + esc(d.hinweis) : ''}${d.vorschlag != null && ekU != null ? ` · erwarteter Gewinn <b class="${clsOf(expProfit(ekU, d.vorschlag))}">${eur(expProfit(ekU, d.vorschlag) * m)}</b>${m > 1 ? ` (${eur(ekU)} bezahlt je Stück)` : ''}` : ''}</p>
         <label class="wide">Notiz<input id="b-notiz" value="${esc(d.notiz)}" placeholder="optional, z. B. Laden XY" /></label>
         <label class="btn">Foto${d.photo ? ' ✓' : ''}<input id="b-photo" type="file" accept="image/*" hidden /></label>
         <a class="btn" href="${cmLink(d.name)}" target="_blank" rel="noopener">Bei Cardmarket ansehen</a>
@@ -2077,6 +2107,13 @@ function bindBookForm(el) {
     readForm();
     if (d.cardId || d.name || d.marketIn) { await suggestPrice(d); renderBook(); }
   }); });
+  $$('[data-gq]', el).forEach((b) => b.addEventListener('click', async () => {
+    readForm();
+    d.note = b.dataset.gq === 'Roh' ? 'NM' : b.dataset.gq;
+    d.manual = false;
+    if (d.cardId || d.name) { d.vorschlagInfo = 'Berechne …'; d.hinweis = ''; renderBook(); await suggestPrice(d); }
+    renderBook();
+  }));
   $('#b-calc', el).addEventListener('click', async () => {
     readForm(); d.manual = false;
     $('#b-info').textContent = 'Berechne …';
