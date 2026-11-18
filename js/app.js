@@ -1685,54 +1685,145 @@ function renderCart() {
 }
 
 
-// ---------- Ankauf-Buch: einfache Eingabe, Verkaufsvorschlag, Wischen = verkauft ----------
+// ---------- Ankauf-Buch: Eingabe mit Kartenvorschlägen, Verkaufsvorschlag (anpassbar), Bibliothek mit Bearbeiten/Foto, Wischen ----------
 let book = [];
+let bookOpen = null;      // uid des Eintrags in Bearbeitung
+let draft = null;          // Formularzustand „Neu angekauft“
 const saveBook = () => kvSet('flipbook', book);
-async function loadBook() { book = (await kvGet('flipbook', [])) || []; }
+let lot = { items: [], total: null };  // Sammelkauf in Arbeit
+const saveLot = () => kvSet('lotdraft', lot);
+async function loadBook() { book = (await kvGet('flipbook', [])) || []; lot = (await kvGet('lotdraft', null)) || { items: [], total: null }; }
+/** Gesamtpreis nach Marktwert auf die Karten verteilen; Mindestpreis je Karte für die Zielmarge. */
+function lotCalc() {
+  const cfg = flipCfg();
+  const pf = settings.platforms[settings.platform];
+  const w = lot.items.map((x) => x.market ?? x.autoVorschlag ?? x.vorschlag ?? 0);
+  const sw = w.reduce((a, b) => a + b, 0);
+  const n = lot.items.length;
+  const rows = lot.items.map((x, i) => {
+    const ek = lot.total != null && n ? lot.total * (sw > 0 ? w[i] / sw : 1 / n) : null;
+    const min = ek != null ? Math.ceil(((ek * (1 + cfg.marge) + pf.versand) / (1 - pf.provision)) * 2) / 2 : null;
+    const vk = x.vorschlag;
+    const gewinn = vk != null && ek != null ? vk * (1 - pf.provision) - pf.versand - ek : null;
+    return { x, ek, min, vk, gewinn };
+  });
+  const markt = lot.items.reduce((a, x) => a + (x.market || 0), 0);
+  const vkSum = rows.reduce((a, r) => a + (r.vk || 0), 0);
+  const gewinn = rows.reduce((a, r) => a + (r.gewinn || 0), 0);
+  return { rows, markt, vkSum, gewinn, quote: lot.total != null && markt > 0 ? lot.total / markt : null, marge: cfg.marge };
+}
+function lotHtml(cls) {
+  if (!lot.items.length) return '';
+  const c = lotCalc();
+  return `<div class="card lot">
+    <h2>Sammelkauf · ${lot.items.length} Karten</h2>
+    <label>Gesamt bezahlt €<input id="lot-total" inputmode="decimal" value="${lot.total != null ? n2(lot.total) : ''}" placeholder="z. B. 50" /></label>
+    <div class="hero" style="margin-top:10px">
+      <div class="lbl">Erwarteter Gewinn zusammen</div>
+      <div class="val ${cls(c.gewinn)}">${lot.total != null ? (c.gewinn > 0 ? '+' : '') + eur(c.gewinn) : '–'}</div>
+      <div class="sub">Marktwert ${eur(c.markt)}${c.quote != null ? ` · bezahlt ${fmt1(c.quote * 100)} % vom Marktwert` : ''} · Verkauf zusammen ${eur(c.vkSum)}</div>
+    </div>
+    ${c.rows.map((r, i) => `<div class="lot-row">
+      <div><div class="n">${esc(r.x.name)}${r.x.nr ? ' <span class="meta">' + esc(r.x.nr) + '</span>' : ''}</div>
+        <div class="meta">${esc(r.x.note || '–')} · Marktwert ${r.x.market != null ? eur(r.x.market) : '–'}${r.ek != null ? ` · anteilig bezahlt <b>${eur(r.ek)}</b>` : ''}</div>
+        ${r.min != null ? `<div class="date">mind. ${eur(r.min)} für ${fmt1(c.marge * 100)} % Marge${r.gewinn != null ? ` · Gewinn <b class="${cls(r.gewinn)}">${eur(r.gewinn)}</b>` : ''}</div>` : ''}</div>
+      <label class="lot-vk">Verkauf €<input data-lotvk="${i}" inputmode="decimal" value="${r.vk != null ? n2(r.vk) : ''}" /></label>
+      <button class="x" data-lotdel="${i}" aria-label="Entfernen">×</button>
+    </div>`).join('')}
+    <div class="grid2" style="margin-top:10px">
+      <button data-lotmin="1">Alle auf Mindestpreis</button>
+      <button data-lotdrop="1">Verwerfen</button>
+    </div>
+    <button class="primary block" id="lot-save" style="margin-top:8px">Kauf speichern (${lot.items.length} Karten)</button>
+  </div>`;
+}
+function bindLot(el) {
+  const t = $('#lot-total', el);
+  if (!t) return;
+  t.addEventListener('change', () => { lot.total = parseNum(t.value); saveLot(); renderBook(); });
+  $$('[data-lotvk]', el).forEach((inp) => inp.addEventListener('change', () => { const x = lot.items[+inp.dataset.lotvk]; x.vorschlag = parseNum(inp.value); x.manual = true; saveLot(); renderBook(); }));
+  $$('[data-lotdel]', el).forEach((b) => b.addEventListener('click', () => { lot.items.splice(+b.dataset.lotdel, 1); saveLot(); renderBook(); }));
+  $('[data-lotmin]', el).addEventListener('click', () => { lotCalc().rows.forEach((r) => { if (r.min != null) { r.x.vorschlag = r.min; r.x.manual = true; } }); saveLot(); renderBook(); });
+  $('[data-lotdrop]', el).addEventListener('click', () => { if (confirm('Sammelkauf verwerfen?')) { lot = { items: [], total: null }; saveLot(); renderBook(); } });
+  $('#lot-save', el).addEventListener('click', () => {
+    if (lot.total == null) return toast('Gesamtpreis eintragen');
+    const c = lotCalc(), lotId = uid(), now = Date.now();
+    c.rows.forEach((r) => book.unshift({ ...r.x, ek: Math.round(r.ek * 100) / 100, uid: uid(), datum: now, vk: null, lotId, notiz: [r.x.notiz, `Sammelkauf ${c.rows.length} Karten für ${eur(lot.total)}`].filter(Boolean).join(' · ') }));
+    saveBook();
+    lot = { items: [], total: null }; saveLot();
+    renderBook();
+    toast(`${c.rows.length} Karten gespeichert`);
+  });
+}
 const NOTE_COND = { MT: 'MT', NM: 'NM', EX: 'EX', GD: 'GD', LP: 'LP', PL: 'PL', PO: 'PO' };
+const newDraft = () => ({ name: '', nr: '', note: 'NM', lang: tcgLangToLf(settings.searchLang) || 'de', ek: null, vorschlag: null, manual: false, notiz: '', cardId: null, cardLang: null, image: null, market: null, vorschlagInfo: '' });
 
-/** Verkaufsvorschlag: TCGdex-Marktwert (Note + Sprache), sonst Einkauf + Wunschmarge + Gebühren. */
+/** Marktwert + Verkaufsvorschlag. Mit cardId exakt, sonst Suche über Name/Nummer. Überschreibt keinen manuellen Preis. */
 async function suggestPrice(e) {
   const cfg = flipCfg();
   const pf = settings.platforms[settings.platform];
   const target = e.ek != null ? (e.ek * (1 + cfg.marge) + pf.versand) / (1 - pf.provision) : null;
-  let market = null, match = null, note = '';
+  let market = null, note = '';
   try {
-    const q = `${e.name}${e.nr ? ' ' + e.nr : ''}`;
-    const list = await searchSmart(settings.searchLang, q, langAvail);
-    if (list[0] && list[0]._s < 3) {
-      match = list[0];
-      const r = await getCard(match.lang || settings.searchLang, match.id, { force: false });
+    let id = e.cardId, lang = e.cardLang;
+    if (!id && e.name) {
+      const list = await searchSmart(settings.searchLang, `${e.name}${e.nr ? ' ' + e.nr : ''}`, langAvail);
+      if (list[0] && list[0]._s < 3) { id = list[0].id; lang = list[0].lang || settings.searchLang; e.match = `${list[0].name} · ${list[0].setName || ''} ${list[0].localId}`; }
+    }
+    if (id) {
+      const r = await getCard(lang, id, { force: false });
       if (r.data) {
-        const pricing = extractPricing(r.data);
-        const base = combine(marketSources(pricing, null, []));
-        if (base != null) {
-          const cond = NOTE_COND[(e.note || '').toUpperCase()] || 'NM';
-          const lang = settings.lf[e.lang] != null ? e.lang : 'en';
-          market = marktwert({ referenz: base, cf: settings.cf, lf: settings.lf, zustand: cond, sprache: lang, refZustand: 'NM', refSprache: 'en' });
-          if (/^(PSA|BGS|CGC|SGC)/i.test(e.note || '')) note = 'Gegradet: Wert gilt ungegradet, Graded-Preis über „Bewerten“ prüfen.';
-        }
-        e.image = r.data.image || match.image || null;
-        e.match = `${match.name} · ${match.setName || ''} ${match.localId}`;
+        const base = combine(marketSources(extractPricing(r.data), null, []));
+        const cond = NOTE_COND[(e.note || '').toUpperCase()] || 'NM';
+        const lf = settings.lf[e.lang] != null ? e.lang : 'en';
+        if (base != null) market = marktwert({ referenz: base, cf: settings.cf, lf: settings.lf, zustand: cond, sprache: lf, refZustand: 'NM', refSprache: 'en' });
+        e.cardId = id; e.cardLang = lang;
+        e.image = e.image || r.data.image || null;
+        e.match = e.match || `${r.data.name} · ${r.data.set?.name || ''} ${r.data.localId}`;
+        if (/^(PSA|BGS|CGC|SGC)/i.test(e.note || '')) note = 'Gegradet: Marktwert gilt ungegradet – Graded-Preis über „Bewerten“ prüfen und Preis anpassen.';
       }
     }
   } catch {}
   e.market = market;
-  e.vorschlag = market != null ? roundPrice(market * (1 - cfg.undercut)) : target != null ? Math.ceil(target * 2) / 2 : null;
-  e.vorschlagInfo = market != null ? `Marktwert ${eur(market)} (${e.match}), ${fmt1(cfg.undercut * 100)} % darunter, damit es zügig verkauft` : target != null ? `Keine Marktdaten gefunden: Einkauf + ${fmt1(cfg.marge * 100)} % Marge + Gebühren` : '';
+  e.marketAt = Date.now();
+  const auto = market != null ? roundPrice(market * (1 - cfg.undercut)) : target != null ? Math.ceil(target * 2) / 2 : null;
+  if (!e.manual) e.vorschlag = auto;
+  e.autoVorschlag = auto;
+  e.vorschlagInfo = market != null ? `Marktwert ${eur(market)}${e.match ? ' (' + e.match + ')' : ''} · Vorschlag ${fmt1(cfg.undercut * 100)} % darunter` : target != null ? `Keine Marktdaten – Einkauf + ${fmt1(cfg.marge * 100)} % Marge + Gebühren` : '';
   e.hinweis = note;
   return e;
 }
 
-function bookProfit(e) {
+function bookProfit(e, vk = e.vk, versand = e.versand) {
   const pf = settings.platforms[e.vkPlattform || settings.platform] || settings.platforms.cardmarket;
-  const netto = e.vk * (1 - pf.provision) - (e.versand ?? 0);
+  const netto = vk * (1 - pf.provision) - (versand ?? 0);
   return { netto, gewinn: netto - (e.ek || 0) };
 }
+
+function photoToData(file, max = 700) {
+  return new Promise((res) => {
+    const im = new Image();
+    im.onload = () => {
+      const s = Math.min(1, max / Math.max(im.naturalWidth, im.naturalHeight));
+      const c = document.createElement('canvas');
+      c.width = Math.round(im.naturalWidth * s); c.height = Math.round(im.naturalHeight * s);
+      c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(im.src);
+      res(c.toDataURL('image/jpeg', 0.8));
+    };
+    im.onerror = () => res(null);
+    im.src = URL.createObjectURL(file);
+  });
+}
+const thumbOf = (e) => (e.photo ? `<img src="${e.photo}" alt="">` : e.image ? img(e.image, 'low', e.name) : '<div class="thumb-ph">–</div>');
+const langSel = (id, val, attr = 'id') => `<select ${attr}="${id}">${LANG_CHIPS.filter((k) => settings.lf[k] != null).map((k) => `<option value="${k}" ${k === val ? 'selected' : ''}>${LANG_LABELS[k]}</option>`).join('')}</select>`;
+const NOTE_LIST = ['MT', 'NM', 'EX', 'GD', 'LP', 'PL', 'PO', 'PSA 10', 'PSA 9', 'PSA 8', 'PSA 7', 'BGS 9.5', 'BGS 9', 'CGC 10', 'CGC 9.5'];
 
 function renderBook() {
   const el = $('#book');
   if (!el) return;
+  draft = draft || newDraft();
+  const d = draft;
   const sold = book.filter((e) => e.vk != null);
   const open = book.filter((e) => e.vk == null);
   const gewinn = sold.reduce((a, e) => a + bookProfit(e).gewinn, 0);
@@ -1740,97 +1831,223 @@ function renderBook() {
   const ekOpen = open.reduce((a, e) => a + (e.ek || 0), 0);
   const wertOpen = open.reduce((a, e) => a + (e.vorschlag || 0), 0);
   const cls = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : '');
+  const pf0 = settings.platforms[settings.platform];
   el.innerHTML = `
     <div class="card">
       <div class="hero">
         <div class="lbl">Gesamttopf · Gewinn aus ${sold.length} Verkäufen</div>
         <div class="val ${cls(gewinn)}">${gewinn > 0 ? '+' : ''}${eur(gewinn)}</div>
-        <div class="sub">Umsatz ${eur(umsatz)} · offen ${open.length} Karten für ${eur(ekOpen)} gekauft, Vorschlag zusammen ${eur(wertOpen)}</div>
+        <div class="sub">Umsatz ${eur(umsatz)} · offen ${open.length} Karten, gekauft für ${eur(ekOpen)}, Ziel zusammen ${eur(wertOpen)}</div>
       </div>
     </div>
+    ${lotHtml(cls)}
     <div class="card">
-      <h2>Neu angekauft</h2>
-      <form id="book-form" class="book-form">
-        <label class="wide">Karte<input id="b-name" placeholder="z. B. Glurak ex" required autocomplete="off" /></label>
-        <label>Nummer<input id="b-nr" placeholder="006/165" autocomplete="off" /></label>
-        <label>Note / Zustand<input id="b-note" list="b-notes" placeholder="NM, LP, PSA 10 …" autocomplete="off" /></label>
-        <datalist id="b-notes">${['MT', 'NM', 'EX', 'GD', 'LP', 'PL', 'PO', 'PSA 10', 'PSA 9', 'PSA 8', 'BGS 9.5', 'CGC 10'].map((x) => `<option value="${x}">`).join('')}</datalist>
-        <label>Sprache<select id="b-lang">${LANG_CHIPS.filter((k) => settings.lf[k] != null).map((k) => `<option value="${k}" ${k === (tcgLangToLf(settings.searchLang) || 'de') ? 'selected' : ''}>${LANG_LABELS[k]}</option>`).join('')}</select></label>
-        <label>Gekauft für €<input id="b-ek" inputmode="decimal" placeholder="z. B. 20" required /></label>
-        <label class="wide">Notiz<input id="b-notiz" placeholder="optional, z. B. Laden XY, leichte Weißung" /></label>
-        <button class="primary wide" type="submit">Speichern und Verkaufspreis berechnen</button>
+      <h2>${lot.items.length ? 'Weitere Karte zum Sammelkauf' : 'Neu angekauft'}</h2>
+      <form id="book-form" class="book-form" autocomplete="off">
+        <label class="wide ac-wrap">Karte<input id="b-name" value="${esc(d.name)}" placeholder="Tippen, z. B. Glurak ex" required />
+          <div id="b-ac" class="ac-list hidden"></div></label>
+        ${d.cardId ? `<div class="wide picked">${d.image ? img(d.image, 'low', d.name) : ''}<span>${esc(d.match || '')}</span><button type="button" class="x" id="b-unpick" aria-label="Auswahl lösen">×</button></div>` : ''}
+        <label>Nummer<input id="b-nr" value="${esc(d.nr)}" placeholder="006/165" /></label>
+        <label>Note / Zustand<input id="b-note" list="b-notes" value="${esc(d.note)}" placeholder="NM, LP, PSA 10 …" /></label>
+        <datalist id="b-notes">${NOTE_LIST.map((x) => `<option value="${x}">`).join('')}</datalist>
+        <label>Sprache${langSel('b-lang', d.lang)}</label>
+        <label>Gekauft für €<input id="b-ek" inputmode="decimal" value="${d.ek != null ? n2(d.ek) : ''}" placeholder="${lot.items.length ? 'über Gesamtpreis' : 'z. B. 20'}" /></label>
+        <label class="wide">Verkaufspreis € <span class="meta">${d.manual ? '(von dir angepasst)' : '(Vorschlag, anpassbar)'}</span>
+          <span class="inline"><input id="b-vk" inputmode="decimal" value="${d.vorschlag != null ? n2(d.vorschlag) : ''}" placeholder="wird berechnet" /><button type="button" id="b-calc">Berechnen</button></span></label>
+        <p class="date wide" id="b-info">${esc(d.vorschlagInfo || '')}${d.hinweis ? ' · ' + esc(d.hinweis) : ''}${d.vorschlag != null && d.ek != null ? ` · erwarteter Gewinn <b class="${cls(bookProfit(d, d.vorschlag, pf0.versand).gewinn)}">${eur(bookProfit(d, d.vorschlag, pf0.versand).gewinn)}</b>` : ''}</p>
+        <label class="wide">Notiz<input id="b-notiz" value="${esc(d.notiz)}" placeholder="optional, z. B. Laden XY, leichte Weißung" /></label>
+        <label class="btn wide">Foto hinzufügen${d.photo ? ' ✓' : ''}<input id="b-photo" type="file" accept="image/*" hidden /></label>
+        ${lot.items.length ? '' : '<button class="primary wide" type="submit">In die Bibliothek</button>'}
+        <button type="button" class="wide" id="b-lotadd">${lot.items.length ? 'Zum Sammelkauf hinzufügen' : '+ Weitere Karte zu diesem Kauf'}</button>
       </form>
     </div>
     <div class="card">
       <h2>Bibliothek · ${book.length}</h2>
-      <p class="date">Nach rechts wischen = verkauft · nach links wischen = löschen</p>
-      ${book.length ? [...open, ...sold].map((e) => {
-        const p = e.vk != null ? bookProfit(e) : null;
-        return `<div class="book-row ${e.vk != null ? 'sold' : ''}" data-uid="${e.uid}">
-          ${e.image ? img(e.image, 'low', e.name) : '<div class="thumb-ph">–</div>'}
-          <div>
-            <div class="n">${esc(e.name)}${e.nr ? ' <span class="meta">' + esc(e.nr) + '</span>' : ''}</div>
-            <div class="meta">${esc(e.note || '–')} · ${esc(LANG_LABELS[e.lang] || e.lang)} · gekauft ${eur(e.ek)} am ${new Date(e.datum).toLocaleDateString('de-DE')}</div>
-            ${e.vk != null
-              ? `<div class="meta">verkauft für <b>${eur(e.vk)}</b>, Versand ${eur(e.versand ?? 0)} · ${new Date(e.vkDatum).toLocaleDateString('de-DE')}</div>`
-              : `<div class="date">${esc(e.vorschlagInfo || '')}${e.hinweis ? ' · ' + esc(e.hinweis) : ''}</div>`}
-            ${e.notiz ? `<div class="date">${esc(e.notiz)}</div>` : ''}
-            <div class="sell-sheet hidden" data-sheet="${e.uid}">
-              <div class="grid2">
-                <label>Verkauft für €<input data-vk="${e.uid}" inputmode="decimal" value="${e.vorschlag != null ? n2(e.vorschlag) : ''}" /></label>
-                <label>Versand €<input data-vs="${e.uid}" inputmode="decimal" value="${n2(settings.platforms[settings.platform].versand)}" /></label>
-              </div>
-              <label>Über<select data-vp="${e.uid}">${Object.entries(settings.platforms).map(([k, x]) => `<option value="${k}" ${k === settings.platform ? 'selected' : ''}>${esc(x.label)} (${fmt1(x.provision * 100)} %)</option>`).join('')}</select></label>
-              <div class="grid2" style="margin-top:8px"><button class="primary" data-sell="${e.uid}">Verkauft</button><button data-cancel="${e.uid}">Abbrechen</button></div>
-            </div>
-          </div>
-          <div class="right">
-            ${p ? `<span class="meta">Gewinn</span><b class="${cls(p.gewinn)}">${p.gewinn > 0 ? '+' : ''}${eur(p.gewinn)}</b>`
-              : `<span class="meta">Verkaufen für</span><b>${e.vorschlag != null ? eur(e.vorschlag) : '–'}</b>${e.vorschlag != null && e.ek != null ? `<span class="meta ${cls(e.vorschlag - e.ek)}">~${e.vorschlag - e.ek > 0 ? '+' : ''}${eur(bookProfit({ ...e, vk: e.vorschlag, versand: settings.platforms[settings.platform].versand }).gewinn)}</span>` : ''}`}
-          </div>
-        </div>`;
-      }).join('') : '<p class="empty">Noch nichts angekauft.</p>'}
+      <p class="date">Antippen = bearbeiten · nach rechts wischen = verkauft · nach links wischen = löschen</p>
+      ${book.length ? [...open, ...sold].map((e) => bookRowHtml(e, cls)).join('') : '<p class="empty">Noch nichts angekauft.</p>'}
     </div>`;
+  bindBookForm(el);
+  bindBookRows(el);
+  bindLot(el);
+}
 
-  $('#book-form').addEventListener('submit', async (ev) => {
+function bookRowHtml(e, cls) {
+  const p = e.vk != null ? bookProfit(e) : null;
+  const pf0 = settings.platforms[settings.platform];
+  const editing = bookOpen === e.uid;
+  return `<div class="book-row ${e.vk != null ? 'sold' : ''} ${editing ? 'editing' : ''}" data-uid="${e.uid}">
+    ${thumbOf(e)}
+    <div>
+      <div class="n">${esc(e.name)}${e.nr ? ' <span class="meta">' + esc(e.nr) + '</span>' : ''}</div>
+      <div class="meta">${esc(e.note || '–')} · ${esc(LANG_LABELS[e.lang] || e.lang)} · gekauft ${eur(e.ek)} am ${new Date(e.datum).toLocaleDateString('de-DE')}</div>
+      ${e.vk != null ? `<div class="meta">verkauft für <b>${eur(e.vk)}</b>, Versand ${eur(e.versand ?? 0)} · ${new Date(e.vkDatum).toLocaleDateString('de-DE')}</div>`
+        : `<div class="date">${e.market != null ? `Marktwert ${eur(e.market)} · Stand ${new Date(e.marketAt || e.datum).toLocaleDateString('de-DE')}` : 'kein Marktwert'}${e.manual ? ' · Preis von dir gesetzt' : ''}</div>`}
+      ${e.notiz ? `<div class="date">${esc(e.notiz)}</div>` : ''}
+    </div>
+    <div class="right">
+      ${p ? `<span class="meta">Gewinn</span><b class="${cls(p.gewinn)}">${p.gewinn > 0 ? '+' : ''}${eur(p.gewinn)}</b>`
+        : `<span class="meta">Verkaufen für</span><b>${e.vorschlag != null ? eur(e.vorschlag) : '–'}</b>${e.vorschlag != null && e.ek != null ? `<span class="meta ${cls(bookProfit(e, e.vorschlag, pf0.versand).gewinn)}">~${eur(bookProfit(e, e.vorschlag, pf0.versand).gewinn)}</span>` : ''}`}
+    </div>
+    ${editing ? `<div class="book-edit" data-edit="${e.uid}">
+      ${e.photo ? `<img class="book-photo" src="${e.photo}" alt="Foto">` : ''}
+      <div class="grid2">
+        <label class="wide2">Karte<input data-f="name" value="${esc(e.name)}" /></label>
+        <label>Nummer<input data-f="nr" value="${esc(e.nr || '')}" /></label>
+        <label>Note<input data-f="note" list="b-notes" value="${esc(e.note || '')}" /></label>
+        <label>Sprache${langSel('lang', e.lang, 'data-f')}</label>
+        <label>Gekauft für €<input data-f="ek" inputmode="decimal" value="${e.ek != null ? n2(e.ek) : ''}" /></label>
+        <label>Verkaufspreis (Ziel) €<input data-f="vorschlag" inputmode="decimal" value="${e.vorschlag != null ? n2(e.vorschlag) : ''}" /></label>
+        ${e.vk != null ? `<label>Verkauft für €<input data-f="vk" inputmode="decimal" value="${n2(e.vk)}" /></label><label>Versand €<input data-f="versand" inputmode="decimal" value="${n2(e.versand ?? 0)}" /></label>` : ''}
+      </div>
+      <label>Notiz<input data-f="notiz" value="${esc(e.notiz || '')}" /></label>
+      <p class="date">${esc(e.vorschlagInfo || '')}${e.autoVorschlag != null && e.manual ? ` · berechnet wären ${eur(e.autoVorschlag)}` : ''}</p>
+      <div class="grid2">
+        <label class="btn">${e.photo ? 'Foto ersetzen' : 'Foto hinzufügen'}<input type="file" accept="image/*" data-photo="${e.uid}" hidden /></label>
+        <button data-recalc="${e.uid}">Marktwert neu berechnen</button>
+        ${e.vk == null ? `<button class="primary" data-opensell="${e.uid}">Verkauft …</button>` : `<button data-unsell="${e.uid}">Verkauf zurücknehmen</button>`}
+        <button data-close="${e.uid}">Fertig</button>
+      </div>
+      <div class="sell-sheet hidden" data-sheet="${e.uid}">
+        <div class="grid2">
+          <label>Verkauft für €<input data-vk="${e.uid}" inputmode="decimal" value="${e.vorschlag != null ? n2(e.vorschlag) : ''}" /></label>
+          <label>Versand €<input data-vs="${e.uid}" inputmode="decimal" value="${n2(pf0.versand)}" /></label>
+        </div>
+        <label>Über<select data-vp="${e.uid}">${Object.entries(settings.platforms).map(([k, x]) => `<option value="${k}" ${k === settings.platform ? 'selected' : ''}>${esc(x.label)} (${fmt1(x.provision * 100)} %)</option>`).join('')}</select></label>
+        <button class="primary block" data-sell="${e.uid}">Als verkauft speichern</button>
+      </div>
+    </div>` : ''}
+  </div>`;
+}
+
+function bindBookForm(el) {
+  const d = draft;
+  const nameIn = $('#b-name', el), ac = $('#b-ac', el);
+  let t = null, seq = 0;
+  const readForm = () => {
+    d.name = nameIn.value.trim(); d.nr = $('#b-nr', el).value.trim(); d.note = $('#b-note', el).value.trim();
+    d.lang = $('#b-lang', el).value; d.ek = parseNum($('#b-ek', el).value); d.notiz = $('#b-notiz', el).value.trim();
+    const vk = parseNum($('#b-vk', el).value);
+    if (vk != null && vk !== d.vorschlag) { d.vorschlag = vk; d.manual = true; }
+  };
+  nameIn.addEventListener('input', () => {
+    clearTimeout(t);
+    if (d.cardId) { d.cardId = null; d.match = ''; d.image = null; }
+    const q = nameIn.value.trim();
+    if (q.length < 2) { ac.classList.add('hidden'); return; }
+    t = setTimeout(async () => {
+      const my = ++seq;
+      ac.innerHTML = '<div class="ac-item meta">Suche …</div>'; ac.classList.remove('hidden');
+      let list = [];
+      try { list = await searchSmart(settings.searchLang, q, langAvail); } catch {}
+      if (my !== seq) return;
+      ac.innerHTML = list.slice(0, 8).map((c, i) => `<button type="button" class="ac-item" data-i="${i}">${img(c.image, 'low', c.name)}<span><b>${esc(c.name)}</b><span class="meta">${esc(c.setName || '')} · ${esc(c.localId)}${c.setCount ? '/' + c.setCount.official : ''}</span></span></button>`).join('') || '<div class="ac-item meta">Keine Treffer</div>';
+      $$('.ac-item[data-i]', ac).forEach((b) => b.addEventListener('mousedown', (ev) => ev.preventDefault()));
+      $$('.ac-item[data-i]', ac).forEach((b) => b.addEventListener('click', async () => {
+        const c = list[+b.dataset.i];
+        readForm();
+        Object.assign(d, { name: c.name, nr: `${c.localId}${c.setCount ? '/' + c.setCount.official : ''}`, cardId: c.id, cardLang: c.lang || settings.searchLang, image: c.image || null, match: `${c.name} · ${c.setName || ''} ${c.localId}`, lang: tcgLangToLf(c.lang || settings.searchLang) || d.lang });
+        ac.classList.add('hidden');
+        renderBook();
+        $('#b-info').textContent = 'Berechne Marktwert …';
+        await suggestPrice(d);
+        renderBook();
+        if (d.ek == null) $('#b-ek').focus();
+      }));
+    }, 350);
+  });
+  nameIn.addEventListener('blur', () => setTimeout(() => ac.classList.add('hidden'), 150));
+  const unpick = $('#b-unpick', el);
+  if (unpick) unpick.addEventListener('click', () => { readForm(); Object.assign(d, { cardId: null, match: '', image: null, market: null }); renderBook(); });
+  $('#b-vk', el).addEventListener('input', () => { d.manual = true; });
+  ['#b-note', '#b-lang', '#b-ek'].forEach((sel) => $(sel, el).addEventListener('change', async () => {
+    readForm();
+    if (d.cardId || d.name) { await suggestPrice(d); renderBook(); }
+  }));
+  $('#b-calc', el).addEventListener('click', async () => {
+    readForm(); d.manual = false;
+    $('#b-info').textContent = 'Berechne …';
+    await suggestPrice(d); renderBook();
+  });
+  $('#b-photo', el).addEventListener('change', async (ev) => {
+    const f = ev.target.files && ev.target.files[0];
+    if (!f) return;
+    readForm(); d.photo = await photoToData(f); renderBook(); toast('Foto hinzugefügt');
+  });
+  $('#b-lotadd', el).addEventListener('click', async () => {
+    readForm();
+    if (!d.name) return toast('Karte eintragen');
+    if (d.market == null && !d.manual) await suggestPrice(d);
+    if (!lot.items.length && d.ek != null) lot.total = d.ek;
+    lot.items.push({ ...d });
+    saveLot();
+    draft = { ...newDraft(), lang: d.lang };
+    renderBook();
+    toast(`${lot.items.length} Karten im Sammelkauf`);
+    $('#b-name').focus();
+  });
+  $('#book-form', el).addEventListener('submit', async (ev) => {
     ev.preventDefault();
-    const e = {
-      uid: uid(), name: $('#b-name').value.trim(), nr: $('#b-nr').value.trim(), note: $('#b-note').value.trim(),
-      lang: $('#b-lang').value, ek: parseNum($('#b-ek').value), notiz: $('#b-notiz').value.trim(), datum: Date.now(), vk: null,
-    };
-    if (!e.name || e.ek == null) return toast('Karte und Einkaufspreis eintragen');
-    const btn = ev.submitter || $('#book-form button');
-    btn.textContent = 'Berechne Verkaufspreis …';
-    btn.disabled = true;
-    await suggestPrice(e);
+    readForm();
+    if (!d.name || d.ek == null) return toast('Karte und Einkaufspreis eintragen');
+    if (d.vorschlag == null || (!d.manual && d.market == null)) await suggestPrice(d);
+    const e = { ...d, uid: uid(), datum: Date.now(), vk: null };
     book.unshift(e);
     saveBook();
+    draft = newDraft();
     renderBook();
     toast(e.vorschlag != null ? `Gespeichert · verkaufen für ${eur(e.vorschlag)}` : 'Gespeichert');
+    $('#b-name').focus();
   });
+}
 
-  const openSheet = (u) => { const s = $(`[data-sheet="${u}"]`, el); if (s) { s.classList.remove('hidden'); s.querySelector('input').focus(); } };
-  $$('[data-cancel]', el).forEach((b) => b.addEventListener('click', () => $(`[data-sheet="${b.dataset.cancel}"]`, el).classList.add('hidden')));
+function bindBookRows(el) {
+  const find = (u) => book.find((x) => x.uid === u);
+  // Antippen = bearbeiten (nicht auf Eingaben/Knöpfe)
+  $$('.book-row', el).forEach((row) => row.addEventListener('click', (ev) => {
+    if (ev.target.closest('.book-edit') || row.dataset.swiped) { delete row.dataset.swiped; return; }
+    bookOpen = bookOpen === row.dataset.uid ? null : row.dataset.uid;
+    renderBook();
+  }));
+  $$('.book-edit [data-f]', el).forEach((inp) => inp.addEventListener('change', async () => {
+    const e = find(inp.closest('[data-edit]').dataset.edit), f = inp.dataset.f;
+    const num = ['ek', 'vorschlag', 'vk', 'versand'].includes(f);
+    e[f] = num ? parseNum(inp.value) : inp.value.trim();
+    if (f === 'vorschlag') e.manual = true;
+    if (['note', 'lang', 'name', 'nr'].includes(f)) { if (f === 'name' || f === 'nr') { e.cardId = null; e.match = ''; } await suggestPrice(e); }
+    saveBook(); renderBook();
+  }));
+  $$('[data-photo]', el).forEach((inp) => inp.addEventListener('change', async (ev) => {
+    const f = ev.target.files && ev.target.files[0];
+    if (!f) return;
+    const e = find(inp.dataset.photo); e.photo = await photoToData(f); saveBook(); renderBook(); toast('Foto gespeichert');
+  }));
+  $$('[data-recalc]', el).forEach((b) => b.addEventListener('click', async () => {
+    const e = find(b.dataset.recalc); b.textContent = 'Berechne …';
+    const keep = e.manual;
+    await suggestPrice(e);
+    if (keep && confirm(`Neuer Vorschlag ${eur(e.autoVorschlag)} übernehmen? (Bisher von dir: ${eur(e.vorschlag)})`)) { e.vorschlag = e.autoVorschlag; e.manual = false; }
+    saveBook(); renderBook();
+  }));
+  $$('[data-close]', el).forEach((b) => b.addEventListener('click', () => { bookOpen = null; renderBook(); }));
+  $$('[data-opensell]', el).forEach((b) => b.addEventListener('click', () => openSheet(el, b.dataset.opensell)));
+  $$('[data-unsell]', el).forEach((b) => b.addEventListener('click', () => { const e = find(b.dataset.unsell); e.vk = null; e.vkDatum = null; saveBook(); renderBook(); }));
   $$('[data-sell]', el).forEach((b) => b.addEventListener('click', () => {
-    const u = b.dataset.sell, e = book.find((x) => x.uid === u);
+    const u = b.dataset.sell, e = find(u);
     const vk = parseNum($(`[data-vk="${u}"]`, el).value);
     if (vk == null || vk < 0) return toast('Verkaufspreis eintragen');
-    e.vk = vk;
-    e.versand = parseNum($(`[data-vs="${u}"]`, el).value) ?? 0;
-    e.vkPlattform = $(`[data-vp="${u}"]`, el).value;
-    e.vkDatum = Date.now();
+    e.vk = vk; e.versand = parseNum($(`[data-vs="${u}"]`, el).value) ?? 0; e.vkPlattform = $(`[data-vp="${u}"]`, el).value; e.vkDatum = Date.now();
     saveBook();
     const g = bookProfit(e).gewinn;
     if (navigator.vibrate) navigator.vibrate(40);
+    bookOpen = null;
     renderBook();
     toast(`Verkauft · Gewinn ${g > 0 ? '+' : ''}${eur(g)}`);
   }));
-
-  // Wischen: rechts = verkauft (Verkaufsfeld öffnen), links = löschen
+  // Wischen: rechts = verkauft (öffnet Bearbeitung mit Verkaufsfeld), links = löschen
   $$('.book-row', el).forEach((row) => {
     let sx = 0, sy = 0, dx = 0, active = false, decided = false;
     row.addEventListener('touchstart', (e) => {
-      if (e.touches.length !== 1 || e.target.closest('input,select,button')) return;
+      if (e.touches.length !== 1 || e.target.closest('input,select,button,.book-edit')) return;
       sx = e.touches[0].clientX; sy = e.touches[0].clientY; dx = 0; active = true; decided = false;
       row.style.transition = 'none';
     }, { passive: true });
@@ -1852,6 +2069,7 @@ function renderBook() {
     const end = () => {
       if (!active) return;
       active = false;
+      if (Math.abs(dx) > 10) row.dataset.swiped = '1';
       row.style.transition = 'transform .22s ease';
       const u = row.dataset.uid;
       if (dx < -row.offsetWidth * 0.35) {
@@ -1864,15 +2082,17 @@ function renderBook() {
         }, 220);
       } else {
         row.style.transform = '';
-        if (dx > row.offsetWidth * 0.3 && !row.classList.contains('sold')) openSheet(u);
+        if (dx > row.offsetWidth * 0.3 && !row.classList.contains('sold')) { bookOpen = u; renderBook(); openSheet($('#book'), u); }
       }
       row.classList.remove('arm-sell', 'arm-del');
     };
     row.addEventListener('touchend', end);
     row.addEventListener('touchcancel', end);
-    // ohne Touch: Doppelklick öffnet Verkaufsfeld
-    row.addEventListener('dblclick', () => { if (!row.classList.contains('sold')) openSheet(row.dataset.uid); });
   });
+}
+function openSheet(el, u) {
+  const s = $(`[data-sheet="${u}"]`, el);
+  if (s) { s.classList.remove('hidden'); const i = s.querySelector('input'); if (i) i.focus(); }
 }
 
 // ---------- Bestand ----------
