@@ -2306,6 +2306,47 @@ function bindComps(el) {
   });
 }
 
+// ----- Letzte eBay-Verkäufe direkt an einer Karte (Bibliothek + Sammlung) -----
+const lsList = (ref) => compsFor(ref).sort((a, b) => b.datum - a.datum);
+function lsSummary(ref) {
+  const s = compsStat(compsFor(ref));
+  return s ? `eBay ${eur(s.value)} aus ${s.n > 1 ? s.n + ' Verkäufen' : '1 Verkauf'}${s.trend != null ? ` · Trend ${s.trend >= 0 ? '+' : ''}${fmt1(s.trend * 100)} %` : ''}` : '';
+}
+function lastSoldHtml(ref, id) {
+  const list = lsList(ref);
+  const s = compsStat(list);
+  return `<div class="ls-box" data-ls="${id}">
+    <div class="ls-head"><div><b>Letzte eBay-Verkäufe</b><div class="meta">${s ? `Wert ${eur(s.value)} · ${s.n}×${s.trend != null ? ` · <span class="${clsOf(s.trend)}">${s.trend >= 0 ? '+' : ''}${fmt1(s.trend * 100)} %/30 T.</span>` : ''}` : 'noch keine'}</div></div>${s && list.length > 1 ? spark(list) : ''}</div>
+    ${list.slice(0, 8).map((c) => `<div class="sale-line"><span>${new Date(c.datum).toLocaleDateString('de-DE')} · ${esc(c.art || '–')} · ${esc(gradeKey(c.note))}</span><b>${eur(c.preis)}</b><button class="x" data-lsdel="${c.uid}" aria-label="Löschen">×</button></div>`).join('')}
+    <div class="ls-add">
+      <input data-lsd type="date" value="${todayIso()}" max="${todayIso()}" aria-label="Datum" />
+      <input data-lsp inputmode="decimal" placeholder="Preis €" aria-label="Preis" />
+      <select data-lsa aria-label="Art"><option>Sofortkauf</option><option>Auktion</option><option>Preisvorschlag</option></select>
+      <button class="primary" data-lsadd aria-label="Verkauf hinzufügen">+</button>
+    </div>
+    <p class="date">Gilt für ${esc(gradeKey(ref.note))}. Bei eBay „Verkaufte Artikel“ filtern und die letzten Preise eintragen, der Wert wird dann automatisch genutzt.</p>
+  </div>`;
+}
+function bindLastSold(root, ref, after) {
+  const box = root.querySelector(`[data-ls]`);
+  if (!box) return;
+  box.addEventListener('click', (ev) => ev.stopPropagation());
+  box.querySelectorAll('[data-lsdel]').forEach((b) => b.addEventListener('click', async () => {
+    comps = comps.filter((c) => c.uid !== b.dataset.lsdel); saveComps(); await after();
+  }));
+  box.querySelector('[data-lsadd]').addEventListener('click', async () => {
+    const preis = parseNum(box.querySelector('[data-lsp]').value);
+    if (preis == null || preis <= 0) return toast('Preis eintragen');
+    const d = box.querySelector('[data-lsd]').value || todayIso();
+    comps.push({ uid: uid(), name: ref.name, nr: ref.nr || '', cardId: ref.cardId || null, cardLang: ref.cardLang || null, image: ref.image || null, note: gradeKey(ref.note) === 'Roh' ? 'Roh' : gradeKey(ref.note), preis, datum: new Date(d + 'T12:00').getTime(), art: box.querySelector('[data-lsa]').value, auto: null });
+    saveComps();
+    await after();
+    const s = compsStat(compsFor(ref));
+    toast(`Verkauf gespeichert · Wert jetzt ${eur(s.value)}`);
+  });
+}
+const invRef = (it) => ({ cardId: it.cardId, cardLang: it.lang, name: it.name, nr: `${it.localId || ''}${it.official ? '/' + it.official : ''}`, image: it.image, note: it.lsNote || 'Roh' });
+
 // ----- Seite -----
 function renderBook() {
   const el = $('#book');
@@ -2385,6 +2426,7 @@ function bookRowHtml(e, s) {
       ${m > 1 || e.opened ? `<div class="meta">Bestand <b>${s.rest}</b> von ${m}${soldN(e) ? ` · ${soldN(e)} verkauft` : ''}${e.opened ? ` · ${e.opened} geöffnet` : ''}</div>` : ''}
       ${e.sales.length ? `<div class="meta">Verkäufe ${eur(s.umsatz)} · netto ${eur(s.netto)}</div>` : ''}
       ${!s.done ? `<div class="date">${e.market != null ? `Marktwert ${eur(e.market)}${m > 1 ? '/Stk' : ''} · Stand ${new Date(e.marketAt || e.datum).toLocaleDateString('de-DE')}` : 'kein Marktwert'}${e.manual ? ' · Preis von dir gesetzt' : ''}</div>` : ''}
+      ${e.typ !== 'sealed' && lsSummary(e) ? `<div class="date ls-line">${lsSummary(e)}</div>` : ''}
       ${e.notiz ? `<div class="date">${esc(e.notiz)}</div>` : ''}
     </div>
     <div class="right">
@@ -2406,6 +2448,7 @@ function bookRowHtml(e, s) {
       <label>Notiz<input data-f="notiz" value="${esc(e.notiz || '')}" /></label>
       <p class="date">${esc(e.vorschlagInfo || '')}${e.autoVorschlag != null && e.manual ? ` · berechnet wären ${eur(e.autoVorschlag)}` : ''}</p>
       ${e.sales.length ? `<div class="sales">${e.sales.map((x, i) => `<div class="sale-line"><span>${x.inhalt ? 'Inhalt: ' : ''}${x.n}× ${eur(x.preis)} · Versand ${eur(x.versand || 0)} · ${x.tausch ? 'Tausch' + (x.gegen ? ' gegen ' + esc(x.gegen) : '') : esc(pfOf(x.pf).label)} · ${new Date(x.datum).toLocaleDateString('de-DE')}</span><b class="${clsOf(saleNetto(x))}">${eur(saleNetto(x))}</b><button class="x" data-saledel="${i}" aria-label="Verkauf löschen">×</button></div>`).join('')}</div>` : ''}
+      ${e.typ !== 'sealed' ? lastSoldHtml(e, e.uid) : ''}
       <div class="grid2">
         <label class="btn">${e.photo ? 'Foto ersetzen' : 'Foto hinzufügen'}<input type="file" accept="image/*" data-photo="${e.uid}" hidden /></label>
         <button data-recalc="${e.uid}">Marktwert neu berechnen</button>
@@ -2545,6 +2588,10 @@ function bindBookRows(el) {
     if (['note', 'lang', 'name', 'nr', 'marketIn', 'ek', 'menge'].includes(f)) await suggestPrice(e);
     done();
   }));
+  $$('.book-edit', el).forEach((box) => {
+    const e = find(box.dataset.edit);
+    if (e && e.typ !== 'sealed') bindLastSold(box, e, async () => { await suggestPrice(e); saveBook(); renderBook(); });
+  });
   $$('[data-photo]', el).forEach((inp) => inp.addEventListener('change', async (ev) => {
     const f = ev.target.files && ev.target.files[0];
     if (!f) return;
@@ -2684,6 +2731,8 @@ function sellModal(e) {
 
 // ---------- Bestand ----------
 function itemValue(it) {
+  const cs = typeof compsFor === 'function' && comps.length ? compsStat(compsFor(invRef(it))) : null;
+  if (cs) return { value: marktwert({ referenz: cs.value, cf: settings.cf, lf: settings.lf, zustand: gradeOf(it.lsNote) ? 'NM' : it.zustand, sprache: it.sprache, refZustand: 'NM', refSprache: it.sprache }) ?? cs.value, ref: cs.value, src: `Deine eBay-Verkäufe (${cs.n}, gewichtet)`, date: cs.last };
   const cm = it.pricing?.cardmarket;
   let ref = null, src = null, date = null;
   const tpm = it.marketField === 'tcgp' && it.pricing ? tpMarket(it.pricing) : null;
@@ -2718,6 +2767,7 @@ const dealText = (wo, art, partner, bew, abg) => [wo ? WO[wo] : '', art ? ART[ar
 const flipCfg = () => ({ start: 0, undercut: 0.05, marge: 0.2, ...(settings.flip || {}) });
 const itemPlatform = (it) => settings.platforms[it.vkPlattform] || settings.platforms[settings.platform] || settings.platforms.cardmarket;
 
+let openLs = null;
 function renderInventory() {
   const el = $('#inv');
   const cfg = flipCfg();
@@ -2852,6 +2902,11 @@ function invItemHtml(it) {
     </div>
     <div class="right">${right}</div>
     <div class="item-actions">${it.status === 'bestand' ? '<button class="small" data-act="sold">Verkauft</button><button class="small ghost" data-act="open">Neu bewerten</button>' : ''}<button class="x trash" data-act="trash" aria-label="Löschen">${TRASH}</button></div>
+    <details class="ls-details"><summary>eBay-Verkäufe${compsFor(invRef(it)).length ? ` · ${compsFor(invRef(it)).length}` : ''}</summary>
+      <label class="ls-note">Gilt für<input data-lsnote list="b-notes-inv" value="${esc(it.lsNote || 'Roh')}" /></label>
+      <datalist id="b-notes-inv">${['Roh', ...NOTE_LIST.filter((x) => gradeOf(x))].map((x) => `<option value="${x}">`).join('')}</datalist>
+      ${lastSoldHtml(invRef(it), it.uid)}
+    </details>
     <details>
       <summary>Bearbeiten</summary>
       <div class="grid2">
@@ -2916,6 +2971,16 @@ function gradingDocHtml(g) {
 }
 
 function bindInvItem(row) {
+  {
+    const it0 = inventory.find((x) => x.uid === row.dataset.uid);
+    if (it0) {
+      const keepOpen = () => { openLs = it0.uid; };
+      bindLastSold(row, invRef(it0), async () => { keepOpen(); renderInventory(); });
+      const ln = row.querySelector('[data-lsnote]');
+      if (ln) ln.addEventListener('change', async () => { it0.lsNote = ln.value.trim() || 'Roh'; keepOpen(); await db.put('inventory', it0); renderInventory(); });
+      if (openLs === it0.uid) { const dd = row.querySelector('.ls-details'); if (dd) dd.open = true; }
+    }
+  }
   const it = inventory.find((x) => x.uid === row.dataset.uid);
   $$('[data-k]', row).forEach((inp) =>
     inp.addEventListener('change', async () => {

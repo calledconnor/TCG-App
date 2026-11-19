@@ -566,3 +566,18 @@ label.check input { width: 18px; height: 18px; min-height: 0; }
 .comp-group details { margin-top: 6px; }
 .comp-group summary { cursor: pointer; }
 .book-form textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 10px; border-radius: 12px; border: 1px solid var(--line); background: var(--sunken); margin: 8px 0; }
+
+/* Umschalter im Ankauf deutlicher */
+.seg.book-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; background: var(--sunken); border: none; border-radius: 12px; margin: 0 0 14px; }
+.seg.book-tabs button { border: none; border-radius: 9px; min-height: 38px; background: transparent; color: var(--muted); font-weight: 600; margin: 0; padding: 0 6px; }
+.seg.book-tabs button.on { background: var(--bg); color: var(--text); box-shadow: 0 1px 4px rgba(0,0,0,.12); }
+/* eBay-Verkäufe an der Karte */
+.ls-box { background: var(--sunken); border-radius: 12px; padding: 10px; display: grid; gap: 6px; }
+.ls-head { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; }
+.ls-add { display: grid; grid-template-columns: 1.2fr 1fr 1fr 40px; gap: 6px; }
+.ls-add input, .ls-add select { background: var(--bg); padding: 8px 6px; font-size: 14px; min-width: 0; }
+.ls-add button { min-height: 38px; padding: 0; font-size: 20px; }
+.ls-line { color: var(--text); }
+.ls-details { margin-top: 8px; }
+.ls-details summary { font-weight: 600; cursor: pointer; }
+.ls-note { font-size: 12px; margin: 8px 0; }
