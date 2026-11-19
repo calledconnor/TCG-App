@@ -586,3 +586,8 @@ label.check input { width: 18px; height: 18px; min-height: 0; }
 .gc-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 8px 0; }
 .gc-grid label { font-size: 12px; }
 .gc-grid input { padding: 7px 8px; }
+
+.psa-box { background: var(--sunken); border-radius: 12px; padding: 10px; display: grid; gap: 6px; }
+.psa-box input { background: var(--bg); }
+.psa-kpis { margin: 0; }
+.psa-kpis > div { background: var(--bg); }

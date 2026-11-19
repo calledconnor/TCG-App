@@ -1769,8 +1769,9 @@ async function suggestPrice(e) {
           if (!gr) market = raw;
           else {
             e.rawMarket = raw;
+            if (gr.company === 'PSA' && e.psaEst != null && fx?.rate) { market = e.psaEst * fx.rate; e.gradedSrc = 'PSA Estimate'; }
             // echte Verkaufspreise je Note (Pokemon Price Tracker), nur mit Schlüssel oder aus dem Cache
-            try {
+            if (market == null) try {
               const pr = extractPricing(r.data);
               const q = `${r.data.name} ${r.data.localId}${r.data.set?.cardCount?.official ? '/' + r.data.set.cardCount.official : ''}`;
               const g = await gradedPrices({ tcgIds: pr.tcgIds, query: q, apiKey: settings.pptKey || '', cacheOnly: !settings.pptKey });
@@ -1784,6 +1785,7 @@ async function suggestPrice(e) {
       }
     } catch {}
   }
+  if (!own && market == null && e.psaEst != null && fx?.rate && gradeOf(e.note)?.company === 'PSA') { market = e.psaEst * fx.rate; e.gradedSrc = 'PSA Estimate'; note = ''; }
   if (!own && !e._noComps) {
     // Preiskorrektur auf automatische Rohpreise
     const corr = compsCorrOn && !gr && market != null ? compsCorrection().factor : null;
@@ -2402,6 +2404,77 @@ function bindLastSold(root, ref, after) {
 }
 const invRef = (it) => ({ cardId: it.cardId, cardLang: it.lang, name: it.name, nr: `${it.localId || ''}${it.official ? '/' + it.official : ''}`, image: it.image, note: it.lsNote || 'Roh' });
 
+// ----- PSA-Daten an einer Karte (Estimate, Partner-Angebot, Population, Zertifikat) -----
+const usd2e = (v) => (v != null && fx?.rate ? v * fx.rate : null);
+const usdFmt = (v) => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function psaLine(o, vk) {
+  const est = usd2e(o.psaEst), off = usd2e(o.psaOffer);
+  const parts = [];
+  const pf = settings.platforms[settings.platform];
+  const net = vk != null ? vk * (1 - pf.provision) - pf.versand : null;
+  if (est != null) parts.push(`PSA Estimate ${eur(est)}`);
+  if (off != null) parts.push(`PSA-Angebot ${eur(off)}`);
+  if (o.psaPop != null) parts.push(`Pop ${o.psaPop}${o.psaPopHi != null ? ' · höher ' + o.psaPopHi : ''}`);
+  if (off != null && net != null && off > net) parts.push(`<b class="pos">PSA-Angebot bringt ${eur(off - net)} mehr als der Verkauf</b>`);
+  return parts.join(' · ');
+}
+function psaHtml(o, vk) {
+  const est = usd2e(o.psaEst), off = usd2e(o.psaOffer);
+  const pf = settings.platforms[settings.platform];
+  const net = vk != null ? vk * (1 - pf.provision) - pf.versand : null;
+  const v = (f) => (o[f] != null ? String(o[f]).replace('.', ',') : '');
+  return `<div class="psa-box" data-psa>
+    <div class="ls-head"><div><b>PSA</b><div class="meta">${o.psaCert ? `Zertifikat ${esc(o.psaCert)}` : 'Werte aus der PSA-App'}${o.psaGrade ? ' · ' + esc(o.psaGrade) : ''}${o.psaPop != null ? ` · Pop ${o.psaPop}${o.psaPopHi != null ? ', höher ' + o.psaPopHi : ''}` : ''}</div></div></div>
+    ${est != null || off != null ? `<div class="kpis psa-kpis">
+      <div><span class="meta">PSA Estimate</span><b>${est != null ? eur(est) : '–'}</b><span class="meta">${o.psaEst != null ? usdFmt(o.psaEst) : ''}</span></div>
+      <div><span class="meta">PSA-Angebot</span><b>${off != null ? eur(off) : '–'}</b><span class="meta">${o.psaOffer != null ? usdFmt(o.psaOffer) + ' · sofort, ohne Gebühren' : ''}</span></div>
+    </div>` : ''}
+    ${off != null && net != null ? `<p class="date">Verkauf für ${eur(vk)} über ${esc(pf.label)} bringt netto ${eur(net)}. ${off >= net ? `<b class="pos">Das PSA-Angebot ist ${eur(off - net)} besser.</b>` : `Das PSA-Angebot liegt ${eur(net - off)} darunter, dafür sofort und ohne Aufwand.`}</p>` : ''}
+    ${off != null && est != null ? `<p class="date">Angebot = ${fmt1((o.psaOffer / o.psaEst) * 100)} % vom Estimate.</p>` : ''}
+    <div class="grid2">
+      <label class="wide2">Zertifikat-Nr.<span class="inline"><input data-psaf="psaCert" inputmode="numeric" value="${esc(o.psaCert || '')}" placeholder="z. B. 161170605" />${settings.psaKey ? '<button type="button" data-psaget>Abrufen</button>' : ''}</span></label>
+      <label>PSA Estimate $<input data-psaf="psaEst" inputmode="decimal" value="${v('psaEst')}" placeholder="69,00" /></label>
+      <label>PSA-Angebot $<input data-psaf="psaOffer" inputmode="decimal" value="${v('psaOffer')}" placeholder="97,05" /></label>
+      <label>Population<input data-psaf="psaPop" inputmode="numeric" value="${v('psaPop')}" /></label>
+      <label>Pop höher<input data-psaf="psaPopHi" inputmode="numeric" value="${v('psaPopHi')}" /></label>
+    </div>
+    <p class="date">Estimate und Angebot in Dollar aus der PSA-App übernehmen, umgerechnet zum Kurs ${fx?.rate ? fx.rate.toLocaleString('de-DE', { maximumFractionDigits: 4 }) : '–'}. Das Estimate wird als Marktwert genutzt, solange du keine eigenen eBay-Verkäufe eingetragen hast.${settings.psaKey ? '' : ' Mit PSA-Token (Optionen) lassen sich Note und Population per Zertifikat abrufen.'}</p>
+  </div>`;
+}
+function bindPsa(root, o, after) {
+  const box = root.querySelector('[data-psa]');
+  if (!box) return;
+  box.addEventListener('click', (ev) => ev.stopPropagation());
+  box.querySelectorAll('[data-psaf]').forEach((inp) => inp.addEventListener('change', async () => {
+    const f = inp.dataset.psaf;
+    o[f] = f === 'psaCert' ? inp.value.replace(/\D/g, '') || null : parseNum(inp.value);
+    o.psaAt = Date.now();
+    await after();
+  }));
+  const g = box.querySelector('[data-psaget]');
+  if (g) g.addEventListener('click', async () => {
+    const cert = (box.querySelector('[data-psaf="psaCert"]').value || '').replace(/\D/g, '');
+    if (!cert) return toast('Zertifikat-Nummer eintragen');
+    g.textContent = '…';
+    try {
+      const res = await fetch('/api/psa-cert?cert=' + cert, { headers: { 'X-PSA-Key': settings.psaKey } });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || 'HTTP ' + res.status);
+      const c = body.PSACert || body;
+      o.psaCert = cert;
+      o.psaGrade = c.CardGrade || c.GradeDescription || null;
+      o.psaPop = c.TotalPopulation ?? o.psaPop ?? null;
+      o.psaPopHi = c.PopulationHigher ?? o.psaPopHi ?? null;
+      o.psaSubject = [c.Year, c.Brand, c.Subject, c.CardNumber ? '#' + c.CardNumber : '', c.Variety].filter(Boolean).join(' ');
+      const m = String(o.psaGrade || '').match(/(\d+(?:\.5)?)\s*$/);
+      if (m && 'note' in o && !gradeOf(o.note)) o.note = 'PSA ' + m[1];
+      o.psaAt = Date.now();
+      await after();
+      toast(`PSA: ${o.psaGrade || 'gefunden'}${o.psaPop != null ? ' · Pop ' + o.psaPop : ''}`);
+    } catch (e) { g.textContent = 'Abrufen'; toast('PSA-Abruf fehlgeschlagen: ' + e.message); }
+  });
+}
+
 // ----- Seite -----
 function renderBook() {
   const el = $('#book');
@@ -2482,6 +2555,7 @@ function bookRowHtml(e, s) {
       ${e.sales.length ? `<div class="meta">Verkäufe ${eur(s.umsatz)} · netto ${eur(s.netto)}</div>` : ''}
       ${!s.done ? `<div class="date">${e.market != null ? `Marktwert ${eur(e.market)}${m > 1 ? '/Stk' : ''} · Stand ${new Date(e.marketAt || e.datum).toLocaleDateString('de-DE')}` : 'kein Marktwert'}${e.manual ? ' · Preis von dir gesetzt' : ''}</div>` : ''}
       ${e.typ !== 'sealed' && lsSummary(e) ? `<div class="date ls-line">${lsSummary(e)}</div>` : ''}
+      ${psaLine(e, e.vorschlag) ? `<div class="date ls-line">${psaLine(e, e.vorschlag)}</div>` : ''}
       ${e.notiz ? `<div class="date">${esc(e.notiz)}</div>` : ''}
     </div>
     <div class="right">
@@ -2504,6 +2578,7 @@ function bookRowHtml(e, s) {
       <p class="date">${esc(e.vorschlagInfo || '')}${e.autoVorschlag != null && e.manual ? ` · berechnet wären ${eur(e.autoVorschlag)}` : ''}</p>
       ${e.sales.length ? `<div class="sales">${e.sales.map((x, i) => `<div class="sale-line"><span>${x.inhalt ? 'Inhalt: ' : ''}${x.n}× ${eur(x.preis)} · Versand ${eur(x.versand || 0)} · ${x.tausch ? 'Tausch' + (x.gegen ? ' gegen ' + esc(x.gegen) : '') : esc(pfOf(x.pf).label)} · ${new Date(x.datum).toLocaleDateString('de-DE')}</span><b class="${clsOf(saleNetto(x))}">${eur(saleNetto(x))}</b><button class="x" data-saledel="${i}" aria-label="Verkauf löschen">×</button></div>`).join('')}</div>` : ''}
       ${e.typ !== 'sealed' ? lastSoldHtml(e, e.uid) : ''}
+      ${gradeOf(e.note)?.company === 'PSA' || e.psaCert || e.psaEst != null ? psaHtml(e, e.vorschlag) : ''}
       <div class="grid2">
         <label class="btn">${e.photo ? 'Foto ersetzen' : 'Foto hinzufügen'}<input type="file" accept="image/*" data-photo="${e.uid}" hidden /></label>
         <button data-recalc="${e.uid}">Marktwert neu berechnen</button>
@@ -2646,6 +2721,7 @@ function bindBookRows(el) {
   $$('.book-edit', el).forEach((box) => {
     const e = find(box.dataset.edit);
     if (e && e.typ !== 'sealed') bindLastSold(box, e, async () => { await suggestPrice(e); saveBook(); renderBook(); });
+    if (e) bindPsa(box, e, async () => { await suggestPrice(e); saveBook(); renderBook(); });
   });
   $$('[data-photo]', el).forEach((inp) => inp.addEventListener('change', async (ev) => {
     const f = ev.target.files && ev.target.files[0];
@@ -2787,6 +2863,7 @@ function sellModal(e) {
 // ---------- Bestand ----------
 function itemValue(it) {
   const cs = typeof compsFor === 'function' && comps.length ? compsStat(compsFor(invRef(it))) : null;
+  if (!cs && it.psaEst != null && fx?.rate) return { value: it.psaEst * fx.rate, ref: it.psaEst * fx.rate, src: 'PSA Estimate', date: it.psaAt || Date.now() };
   if (cs) return { value: marktwert({ referenz: cs.value, cf: settings.cf, lf: settings.lf, zustand: gradeOf(it.lsNote) ? 'NM' : it.zustand, sprache: it.sprache, refZustand: 'NM', refSprache: it.sprache }) ?? cs.value, ref: cs.value, src: `Deine eBay-Verkäufe (${cs.n}, gewichtet)`, date: cs.last };
   const cm = it.pricing?.cardmarket;
   let ref = null, src = null, date = null;
@@ -2822,7 +2899,7 @@ const dealText = (wo, art, partner, bew, abg) => [wo ? WO[wo] : '', art ? ART[ar
 const flipCfg = () => ({ start: 0, undercut: 0.05, marge: 0.2, ...(settings.flip || {}) });
 const itemPlatform = (it) => settings.platforms[it.vkPlattform] || settings.platforms[settings.platform] || settings.platforms.cardmarket;
 
-let openLs = null;
+let openLs = null, openPsa = null;
 function renderInventory() {
   const el = $('#inv');
   const cfg = flipCfg();
@@ -2957,6 +3034,9 @@ function invItemHtml(it) {
     </div>
     <div class="right">${right}</div>
     <div class="item-actions">${it.status === 'bestand' ? '<button class="small" data-act="sold">Verkauft</button><button class="small ghost" data-act="open">Neu bewerten</button>' : ''}<button class="x trash" data-act="trash" aria-label="Löschen">${TRASH}</button></div>
+    <details class="ls-details psa-details"><summary>PSA-Daten${psaLine(it) ? ' · ' + psaLine(it) : ''}</summary>
+      ${psaHtml(it, itemCalc(it).angebot ?? null)}
+    </details>
     <details class="ls-details"><summary>eBay-Verkäufe${compsFor(invRef(it)).length ? ` · ${compsFor(invRef(it)).length}` : ''}</summary>
       <label class="ls-note">Gilt für<input data-lsnote list="b-notes-inv" value="${esc(it.lsNote || 'Roh')}" /></label>
       <datalist id="b-notes-inv">${['Roh', ...NOTE_LIST.filter((x) => gradeOf(x))].map((x) => `<option value="${x}">`).join('')}</datalist>
@@ -3033,7 +3113,9 @@ function bindInvItem(row) {
       bindLastSold(row, invRef(it0), async () => { keepOpen(); renderInventory(); });
       const ln = row.querySelector('[data-lsnote]');
       if (ln) ln.addEventListener('change', async () => { it0.lsNote = ln.value.trim() || 'Roh'; keepOpen(); await db.put('inventory', it0); renderInventory(); });
-      if (openLs === it0.uid) { const dd = row.querySelector('.ls-details'); if (dd) dd.open = true; }
+      if (openLs === it0.uid) { const dd = row.querySelector('.ls-details:not(.psa-details)'); if (dd) dd.open = true; }
+      bindPsa(row, it0, async () => { openPsa = it0.uid; await db.put('inventory', it0); renderInventory(); });
+      if (openPsa === it0.uid) { const dd = row.querySelector('.psa-details'); if (dd) dd.open = true; }
     }
   }
   const it = inventory.find((x) => x.uid === row.dataset.uid);
@@ -3181,6 +3263,11 @@ function renderSettings() {
       <p class="hint">Für die KI-Analyse im Grading. Schlüssel unter <a href="https://platform.claude.com" target="_blank" rel="noopener">platform.claude.com</a> erstellen (kostenpflichtig, etwa 3–5 Cent pro Foto). Er bleibt auf diesem Gerät und geht nur über deinen eigenen Worker an Anthropic. Alternativ als Worker-Secret ANTHROPIC_API_KEY.</p>
     </div>
     <div class="card">
+      <h2>PSA-Zertifikate (optional)</h2>
+      <label>PSA-API-Token<input id="set-psa" type="password" autocomplete="off" placeholder="Token aus psacard.com/publicapi" value="${esc(settings.psaKey || '')}" /></label>
+      <p class="hint">Kostenlos mit PSA-Konto unter <a href="https://www.psacard.com/publicapi" target="_blank" rel="noopener">psacard.com/publicapi</a>. Damit holt „Abrufen“ Note und Population zur Zertifikat-Nummer. Estimate und Partner-Angebot gibt PSA nicht über die Schnittstelle heraus, die trägst du aus der PSA-App ein. Der Token bleibt auf diesem Gerät und geht nur über deinen Worker an PSA.</p>
+    </div>
+    <div class="card">
       <h2>Graded-Preise (Pokemon Price Tracker)</h2>
       <label>API-Schlüssel<input id="set-ppt" type="password" autocomplete="off" placeholder="pokeprice_…" value="${esc(settings.pptKey || '')}" /></label>
       <p class="hint">Kostenlos: 100 Credits pro Tag. Schlüssel holen unter <a href="https://www.pokemonpricetracker.com/api" target="_blank" rel="noopener">pokemonpricetracker.com/api</a>. Er bleibt auf diesem Gerät und geht nur über deinen eigenen Cloudflare-Worker an Pokemon Price Tracker.</p>
@@ -3245,6 +3332,11 @@ function renderSettings() {
     settings.aiKey = e.target.value.trim();
     saveSettings();
     toast(settings.aiKey ? 'KI-Schlüssel gespeichert' : 'KI-Schlüssel entfernt');
+  });
+  $('#set-psa').addEventListener('change', (e) => {
+    settings.psaKey = e.target.value.trim();
+    saveSettings();
+    toast(settings.psaKey ? 'PSA-Token gespeichert' : 'PSA-Token entfernt');
   });
   $('#set-ppt').addEventListener('change', (e) => {
     settings.pptKey = e.target.value.trim();

@@ -1,11 +1,12 @@
 // Cloudflare Worker: liefert die statische App aus und stellt zwei kleine Hilfs-Endpunkte bereit.
 //   /api/fx            USD->EUR-Kurs (EZB über frankfurter.dev), 12 h gecacht
+//   /api/psa-cert      PSA-Zertifikat (PSA Public API, Secret PSA_API_KEY oder Header X-PSA-Key)
 //   /api/graded        Graded-Preise (Pokemon Price Tracker, Schlüssel per Secret PPT_API_KEY oder Header X-PPT-Key), 24 h gecacht
 //   /api/tcgdex/...    GET-Proxy zu https://api.tcgdex.net/v2/... (Fallback, falls der Browser TCGdex blockt), 24 h gecacht
 // Alles andere: statische Dateien (env.ASSETS).
 import { aiGrade, aiIdentify } from './ai-grade.js';
 
-const JSON_HDR = { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'X-PPT-Key, X-Anthropic-Key, Content-Type', 'Access-Control-Expose-Headers': 'X-Credits-Remaining, X-API-Calls-Consumed' };
+const JSON_HDR = { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'X-PPT-Key, X-Anthropic-Key, X-PSA-Key, Content-Type', 'Access-Control-Expose-Headers': 'X-Credits-Remaining, X-API-Calls-Consumed' };
 
 async function cached(ctx, key, ttl, produce) {
   const cache = caches.default;
@@ -99,6 +100,18 @@ export default {
           try { return await run(); } catch (e) { return new Response(JSON.stringify({ error: String(e) }), { status: 502, headers: JSON_HDR }); }
         }
         return cached(ctx, target, 24 * 3600, run);
+      }
+
+      // PSA-Zertifikat (offizielle Public API). Token: Worker-Secret PSA_API_KEY oder Header X-PSA-Key.
+      if (url.pathname === '/api/psa-cert') {
+        const key = env.PSA_API_KEY || request.headers.get('x-psa-key');
+        if (!key) return new Response(JSON.stringify({ error: 'Kein PSA-Token' }), { status: 501, headers: JSON_HDR });
+        const cert = (url.searchParams.get('cert') || '').replace(/\D/g, '');
+        if (!cert) return new Response(JSON.stringify({ error: 'Zertifikat fehlt' }), { status: 400, headers: JSON_HDR });
+        const r = await fetch('https://api.psacard.com/publicapi/cert/GetByCertNumber/' + cert, { headers: { Authorization: 'bearer ' + key, Accept: 'application/json' } });
+        const txt = await r.text();
+        if (!r.ok) return new Response(JSON.stringify({ error: r.status === 401 ? 'PSA-Token ungültig' : 'PSA HTTP ' + r.status }), { status: r.status, headers: JSON_HDR });
+        return new Response(txt, { status: 200, headers: JSON_HDR });
       }
 
       if (url.pathname.startsWith('/api/tcgdex/')) {
