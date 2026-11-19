@@ -1793,7 +1793,7 @@ async function suggestPrice(e) {
     if (cs) {
       e.autoMarket = e.autoMarket ?? market;
       market = cs.value; note = '';
-      e.gradedSrc = `${cs.n} eBay-Verkäuf${cs.n > 1 ? 'en' : ''} (zuletzt ${new Date(cs.last).toLocaleDateString('de-DE')}${cs.trend != null ? `, Trend ${cs.trend >= 0 ? '+' : ''}${fmt1(cs.trend * 100)} %/30 T.` : ''})`;
+      e.gradedSrc = `${cs.n} eBay-Verkäuf${cs.n > 1 ? 'en' : ''}${cs.nAdj ? `, davon ${cs.nAdj} aus anderer Note umgerechnet` : ''} (zuletzt ${new Date(cs.last).toLocaleDateString('de-DE')}${cs.trend != null ? `, Trend ${cs.trend >= 0 ? '+' : ''}${fmt1(cs.trend * 100)} %/30 T.` : ''})`;
     }
   }
   if (e._seq !== my) return e; // neuere Berechnung läuft schon (z. B. Note geändert)
@@ -2115,16 +2115,45 @@ let comps = [];
 let compsCorrOn = true;
 let compDraft = null;
 const saveComps = () => kvSet('comps', comps);
-async function loadComps() { comps = (await kvGet('comps', [])) || []; compsCorrOn = (await kvGet('compsCorr', true)) !== false; }
+async function loadComps() {
+  comps = (await kvGet('comps', [])) || []; compsCorrOn = (await kvGet('compsCorr', true)) !== false;
+  const gc = await kvGet('gradeCurve', null);
+  if (gc) gradeCurve = { psa: { ...GRADE_CURVE_DEF.psa, ...gc.psa }, raw: gc.raw ?? GRADE_CURVE_DEF.raw, co: { ...GRADE_CURVE_DEF.co, ...gc.co } };
+}
 const compNorm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
 const gradeKey = (note) => { const g = gradeOf(note); return g ? `${g.company} ${g.grade}` : 'Roh'; };
 const compKey = (x) => `${x.cardId || compNorm(x.name) + '#' + compNorm(x.nr)}|${gradeKey(x.note)}`;
-const compsFor = (e) => { const k = compKey(e); const kn = `${compNorm(e.name) + '#' + compNorm(e.nr)}|${gradeKey(e.note)}`; return comps.filter((c) => compKey(c) === k || (!c.cardId || !e.cardId) && `${compNorm(c.name) + '#' + compNorm(c.nr)}|${gradeKey(c.note)}` === kn); };
+const GRADE_CURVE_DEF = { psa: { 10: 1, 9: 0.45, 8: 0.28, 7: 0.21, 6: 0.17, 5: 0.14, 4: 0.12, 3: 0.1, 2: 0.09, 1: 0.08 }, raw: 0.22, co: { PSA: 1, BGS: 0.9, CGC: 0.75, SGC: 0.75 } };
+let gradeCurve = JSON.parse(JSON.stringify(GRADE_CURVE_DEF));
+/** Wert einer Note relativ zu PSA 10 (Roh = ungegradet NM). Halbe Noten geometrisch interpoliert, Firma als Faktor. */
+function gradeIdx(note) {
+  const g = gradeOf(note);
+  if (!g) return gradeCurve.raw;
+  const x = parseFloat(g.grade), lo = Math.floor(x), hi = Math.ceil(x), p = gradeCurve.psa;
+  const a = p[lo] ?? 0.08, b = p[hi] ?? a;
+  return (lo === hi ? a : Math.sqrt(a * b)) * (gradeCurve.co[g.company] ?? 0.8);
+}
+const fx2 = (v) => v.toLocaleString('de-DE', { maximumFractionDigits: 2 });
+const gradeFactor = (from, to) => gradeIdx(to) / gradeIdx(from);
+const cardKeyC = (x) => x.cardId || compNorm(x.name) + '#' + compNorm(x.nr);
+const nameKeyC = (x) => compNorm(x.name) + '#' + compNorm(x.nr);
+/** Alle Verkäufe derselben Karte, auf die Note von e umgerechnet. Andere Noten zählen schwächer. */
+function compsFor(e) {
+  const k = cardKeyC(e), kn = nameKeyC(e), tg = gradeKey(e.note);
+  const tgo = gradeOf(e.note);
+  return comps.filter((c) => cardKeyC(c) === k || ((!c.cardId || !e.cardId) && nameKeyC(c) === kn)).map((c) => {
+    if (gradeKey(c.note) === tg) return c;
+    const cg = gradeOf(c.note);
+    const f = gradeFactor(c.note, tg === 'Roh' ? 'Roh' : e.note);
+    const wMul = !cg || !tgo ? 0.25 : cg.company === tgo.company ? 0.5 : 0.4;
+    return { ...c, preis: c.preis * f, origPreis: c.preis, adj: f, wMul };
+  });
+}
 /** Gewichteter Median (Halbwertszeit 30 Tage) + Trend aus gewichteter Regression. */
 function compsStat(list) {
   if (!list.length) return null;
   const now = Date.now(), D = 864e5;
-  const pts = list.map((c) => ({ p: c.preis, t: c.datum, w: Math.pow(0.5, Math.max(0, (now - c.datum) / D) / 30) })).sort((a, b) => a.p - b.p);
+  const pts = list.map((c) => ({ p: c.preis, t: c.datum, w: (c.wMul ?? 1) * Math.pow(0.5, Math.max(0, (now - c.datum) / D) / 30) })).sort((a, b) => a.p - b.p);
   const W = pts.reduce((a, x) => a + x.w, 0);
   let acc = 0, med = pts[0].p;
   for (const x of pts) { acc += x.w; if (acc >= W / 2) { med = x.p; break; } }
@@ -2135,7 +2164,7 @@ function compsStat(list) {
     if (vt > 0 && mp > 0) trend = ((cov / vt) * 30 * D) / mp;
   }
   const dates = list.map((c) => c.datum);
-  return { n: list.length, value: med, min: pts[0].p, max: pts[pts.length - 1].p, trend, last: Math.max(...dates), first: Math.min(...dates) };
+  return { n: list.length, nAdj: list.filter((c) => c.adj).length, value: med, min: pts[0].p, max: pts[pts.length - 1].p, trend, last: Math.max(...dates), first: Math.min(...dates) };
 }
 /** Preiskorrektur: Median aus (eBay-Wert ÷ automatischer Wert) über Rohkarten mit beiden Werten. */
 function compsCorrection() {
@@ -2188,14 +2217,28 @@ function renderComps(el) {
         <div class="sub">${corr.factor != null ? `Echte Verkäufe liegen im Mittel ${fmt1(Math.abs(corr.factor - 1) * 100)} % ${corr.factor >= 1 ? 'über' : 'unter'} den automatischen Preisen (${corr.n} Karten)` : `Ab 2 Rohkarten mit Verkäufen wird verglichen (bisher ${corr.n})`}</div>
       </div>
       ${corr.factor != null ? `<label class="check"><input type="checkbox" id="c-corr" ${compsCorrOn ? 'checked' : ''} /> Korrektur auf automatische Preise im Ankauf anwenden</label>` : ''}
-      <p class="date">Karten mit eigenen Verkäufen nutzen im Ankauf, im Trade und in der Bibliothek direkt diesen Wert. Neuere Verkäufe zählen mehr (Halbwertszeit 30 Tage).</p>
+      <p class="date">Karten mit eigenen Verkäufen nutzen im Ankauf, im Trade und in der Bibliothek direkt diesen Wert. Neuere Verkäufe zählen mehr (Halbwertszeit 30 Tage). Verkäufe in anderer Note werden umgerechnet.</p>
+    </div>
+    <div class="card">
+      <details>
+        <summary><b>Grading-Faktoren</b> <span class="meta">· Wert im Verhältnis zu PSA 10</span></summary>
+        <p class="date">Beispiel: Steht PSA 9 auf 45 %, schätzt die App eine PSA 9 auf 45 % einer PSA 10. Die Firma wirkt zusätzlich, z. B. CGC 75 %: Eine CGC 9 hat dann etwa 75 % des Werts einer PSA 9.</p>
+        <div class="gc-grid">
+          ${[10, 9, 8, 7, 6, 5, 4, 3].map((g) => `<label>PSA ${g}<input data-gc="psa.${g}" inputmode="decimal" value="${fmt1(gradeCurve.psa[g] * 100)}" /></label>`).join('')}
+          <label>Roh (NM)<input data-gc="raw" inputmode="decimal" value="${fmt1(gradeCurve.raw * 100)}" /></label>
+        </div>
+        <div class="gc-grid">${['PSA', 'BGS', 'CGC', 'SGC'].map((k) => `<label>${k}<input data-gc="co.${k}" inputmode="decimal" value="${fmt1(gradeCurve.co[k] * 100)}" /></label>`).join('')}</div>
+        <p class="date">Umrechnung z. B.: PSA 9 → PSA 8 ×${fx2(gradeFactor('PSA 9', 'PSA 8'))} · PSA 9 → PSA 10 ×${fx2(gradeFactor('PSA 9', 'PSA 10'))} · CGC 9 → PSA 9 ×${fx2(gradeFactor('CGC 9', 'PSA 9'))} · BGS 9.5 → PSA 10 ×${fx2(gradeFactor('BGS 9.5', 'PSA 10'))} · Roh → PSA 9 ×${fx2(gradeFactor('Roh', 'PSA 9'))}</p>
+        <button class="small" id="gc-reset">Standardwerte</button>
+      </details>
     </div>
     <div class="card">
       <h2>Verkauf eintragen</h2>
       <div class="book-form">
         <label class="wide ac-wrap">Karte<input id="c-name" value="${esc(d.name)}" placeholder="Tippen, z. B. Walrein ex" autocomplete="off" /><div id="c-ac" class="ac-list hidden"></div></label>
         ${d.cardId ? `<div class="wide picked">${d.image ? img(d.image, 'low', d.name) : ''}<span>${esc(d.match || d.name)}</span><button type="button" class="x" id="c-unpick" aria-label="Auswahl lösen">×</button></div>` : `<label class="wide">Nummer<input id="c-nr" value="${esc(d.nr)}" placeholder="optional, 89/92" /></label>`}
-        <div class="wide grade-chips">${['Roh', 'PSA 10', 'PSA 9', 'PSA 8', 'PSA 7', 'CGC 9.5', 'CGC 7.5', 'BGS 9.5'].map((g) => `<button type="button" data-cg="${g}" class="${gradeKey(d.note) === (g === 'Roh' ? 'Roh' : gradeKey(g)) ? 'on' : ''}">${g}</button>`).join('')}</div>
+        <p class="date wide">Note des verkauften Artikels, darf von deiner Karte abweichen:</p>
+        <div class="wide grade-chips">${['Roh', 'PSA 10', 'PSA 9', 'PSA 8', 'PSA 7', 'CGC 9.5', 'CGC 9', 'CGC 7.5', 'BGS 9.5', 'BGS 9'].map((g) => `<button type="button" data-cg="${g}" class="${gradeKey(d.note) === (g === 'Roh' ? 'Roh' : gradeKey(g)) ? 'on' : ''}">${g}</button>`).join('')}</div>
         <label>Note<input id="c-note" list="b-notes" value="${esc(d.note)}" /></label>
         <datalist id="b-notes">${NOTE_LIST.map((x) => `<option value="${x}">`).join('')}</datalist>
         <label>Art<select id="c-art">${['Sofortkauf', 'Auktion', 'Preisvorschlag'].map((a) => `<option ${a === d.art ? 'selected' : ''}>${a}</option>`).join('')}</select></label>
@@ -2240,6 +2283,15 @@ function bindComps(el) {
     d.art = $('#c-art', el).value; d.preis = parseNum($('#c-preis', el).value); d.datum = $('#c-date', el).value || todayIso();
     const p = $('#c-paste', el); if (p) d.paste = p.value;
   };
+  $$('[data-gc]', el).forEach((inp) => inp.addEventListener('change', () => {
+    const v = parseNum(inp.value);
+    if (v == null || v <= 0) return toast('Wert in % eintragen');
+    const [a, b] = inp.dataset.gc.split('.');
+    if (b) gradeCurve[a][b] = v / 100; else gradeCurve[a] = v / 100;
+    kvSet('gradeCurve', gradeCurve); renderBook();
+  }));
+  const gr0 = $('#gc-reset', el);
+  if (gr0) gr0.addEventListener('click', () => { gradeCurve = JSON.parse(JSON.stringify(GRADE_CURVE_DEF)); kvSet('gradeCurve', null); renderBook(); });
   const cb = $('#c-corr', el);
   if (cb) cb.addEventListener('change', () => { compsCorrOn = cb.checked; kvSet('compsCorr', compsCorrOn); toast(compsCorrOn ? 'Korrektur aktiv' : 'Korrektur aus'); });
   $$('[data-cg]', el).forEach((b) => b.addEventListener('click', () => { read(); d.note = b.dataset.cg; renderBook(); }));
@@ -2310,21 +2362,23 @@ function bindComps(el) {
 const lsList = (ref) => compsFor(ref).sort((a, b) => b.datum - a.datum);
 function lsSummary(ref) {
   const s = compsStat(compsFor(ref));
-  return s ? `eBay ${eur(s.value)} aus ${s.n > 1 ? s.n + ' Verkäufen' : '1 Verkauf'}${s.trend != null ? ` · Trend ${s.trend >= 0 ? '+' : ''}${fmt1(s.trend * 100)} %` : ''}` : '';
+  return s ? `eBay ${eur(s.value)} aus ${s.n > 1 ? s.n + ' Verkäufen' : '1 Verkauf'}${s.nAdj ? ` (${s.nAdj} umgerechnet)` : ''}${s.trend != null ? ` · Trend ${s.trend >= 0 ? '+' : ''}${fmt1(s.trend * 100)} %` : ''}` : '';
 }
 function lastSoldHtml(ref, id) {
   const list = lsList(ref);
   const s = compsStat(list);
   return `<div class="ls-box" data-ls="${id}">
     <div class="ls-head"><div><b>Letzte eBay-Verkäufe</b><div class="meta">${s ? `Wert ${eur(s.value)} · ${s.n}×${s.trend != null ? ` · <span class="${clsOf(s.trend)}">${s.trend >= 0 ? '+' : ''}${fmt1(s.trend * 100)} %/30 T.</span>` : ''}` : 'noch keine'}</div></div>${s && list.length > 1 ? spark(list) : ''}</div>
-    ${list.slice(0, 8).map((c) => `<div class="sale-line"><span>${new Date(c.datum).toLocaleDateString('de-DE')} · ${esc(c.art || '–')} · ${esc(gradeKey(c.note))}</span><b>${eur(c.preis)}</b><button class="x" data-lsdel="${c.uid}" aria-label="Löschen">×</button></div>`).join('')}
+    ${list.slice(0, 10).map((c) => `<div class="sale-line"><span>${new Date(c.datum).toLocaleDateString('de-DE')} · ${esc(c.art || '–')} · <span class="${gradeOf(c.note) ? 'grade-badge' : ''}">${esc(gradeKey(c.note))}</span>${c.adj ? ` ${eur(c.origPreis)} <span class="meta">→ ×${fx2(c.adj)}</span>` : ''}</span><b>${c.adj ? '≈ ' : ''}${eur(c.preis)}</b><button class="x" data-lsdel="${c.uid}" aria-label="Löschen">×</button></div>`).join('')}
     <div class="ls-add">
       <input data-lsd type="date" value="${todayIso()}" max="${todayIso()}" aria-label="Datum" />
       <input data-lsp inputmode="decimal" placeholder="Preis €" aria-label="Preis" />
       <select data-lsa aria-label="Art"><option>Sofortkauf</option><option>Auktion</option><option>Preisvorschlag</option></select>
       <button class="primary" data-lsadd aria-label="Verkauf hinzufügen">+</button>
+      <label class="ls-n">Note des verkauften Artikels<input data-lsn list="ls-notes" value="${esc(gradeKey(ref.note))}" /></label>
     </div>
-    <p class="date">Gilt für ${esc(gradeKey(ref.note))}. Bei eBay „Verkaufte Artikel“ filtern und die letzten Preise eintragen, der Wert wird dann automatisch genutzt.</p>
+    <datalist id="ls-notes">${['Roh', 'PSA 10', 'PSA 9', 'PSA 8', 'PSA 7', 'PSA 6', 'CGC 10', 'CGC 9.5', 'CGC 9', 'CGC 8.5', 'CGC 8', 'CGC 7.5', 'BGS 10', 'BGS 9.5', 'BGS 9', 'BGS 8.5', 'SGC 10', 'SGC 9'].map((x) => `<option value="${x}">`).join('')}</datalist>
+    <p class="date">Deine Karte: ${esc(gradeKey(ref.note))}. Verkäufe in anderer Note oder von anderer Grading-Firma werden über die Grading-Faktoren umgerechnet und zählen schwächer.</p>
   </div>`;
 }
 function bindLastSold(root, ref, after) {
@@ -2338,7 +2392,8 @@ function bindLastSold(root, ref, after) {
     const preis = parseNum(box.querySelector('[data-lsp]').value);
     if (preis == null || preis <= 0) return toast('Preis eintragen');
     const d = box.querySelector('[data-lsd]').value || todayIso();
-    comps.push({ uid: uid(), name: ref.name, nr: ref.nr || '', cardId: ref.cardId || null, cardLang: ref.cardLang || null, image: ref.image || null, note: gradeKey(ref.note) === 'Roh' ? 'Roh' : gradeKey(ref.note), preis, datum: new Date(d + 'T12:00').getTime(), art: box.querySelector('[data-lsa]').value, auto: null });
+    const sn = (box.querySelector('[data-lsn]')?.value || '').trim() || gradeKey(ref.note);
+    comps.push({ uid: uid(), name: ref.name, nr: ref.nr || '', cardId: ref.cardId || null, cardLang: ref.cardLang || null, image: ref.image || null, note: gradeKey(sn), preis, datum: new Date(d + 'T12:00').getTime(), art: box.querySelector('[data-lsa]').value, auto: null });
     saveComps();
     await after();
     const s = compsStat(compsFor(ref));

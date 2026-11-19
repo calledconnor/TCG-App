@@ -581,3 +581,8 @@ label.check input { width: 18px; height: 18px; min-height: 0; }
 .ls-details { margin-top: 8px; }
 .ls-details summary { font-weight: 600; cursor: pointer; }
 .ls-note { font-size: 12px; margin: 8px 0; }
+
+.ls-add .ls-n { grid-column: 1 / -1; font-size: 11px; }
+.gc-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 8px 0; }
+.gc-grid label { font-size: 12px; }
+.gc-grid input { padding: 7px 8px; }
