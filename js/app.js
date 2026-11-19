@@ -1707,6 +1707,7 @@ async function loadBook() {
   lot = (await kvGet('lotdraft', null)) || { items: [], total: null, groups: {} };
   lot.groups = lot.groups || {};
   await loadTrade();
+  await loadComps();
 }
 const NOTE_COND = { MT: 'MT', NM: 'NM', EX: 'EX', GD: 'GD', LP: 'LP', PL: 'PL', PO: 'PO' };
 const NOTE_LIST = ['MT', 'NM', 'EX', 'GD', 'LP', 'PL', 'PO', 'PSA 10', 'PSA 9', 'PSA 8', 'PSA 7', 'BGS 9.5', 'BGS 9', 'CGC 10', 'CGC 9.5'];
@@ -1740,6 +1741,7 @@ async function suggestPrice(e) {
   const ekU = e.ek != null ? e.ek / (e.menge || 1) : null;
   const target = ekU != null ? minPrice(ekU) : null;
   let market = null, note = '', range = '';
+  e.autoMarket = null;
   const my = (e._seq = (e._seq || 0) + 1);
   const gr = gradeOf(e.note);
   e.rawMarket = null; e.gradedSrc = '';
@@ -1781,6 +1783,18 @@ async function suggestPrice(e) {
         }
       }
     } catch {}
+  }
+  if (!own && !e._noComps) {
+    // Preiskorrektur auf automatische Rohpreise
+    const corr = compsCorrOn && !gr && market != null ? compsCorrection().factor : null;
+    if (corr) { e.autoMarket = market; market *= corr; e.gradedSrc = `automatisch, korrigiert ${corr >= 1 ? '+' : ''}${fmt1((corr - 1) * 100)} % nach deinen eBay-Verkäufen`; }
+    // eigene eBay-Verkäufe haben Vorrang
+    const cs = compsStat(compsFor(e));
+    if (cs) {
+      e.autoMarket = e.autoMarket ?? market;
+      market = cs.value; note = '';
+      e.gradedSrc = `${cs.n} eBay-Verkäuf${cs.n > 1 ? 'en' : ''} (zuletzt ${new Date(cs.last).toLocaleDateString('de-DE')}${cs.trend != null ? `, Trend ${cs.trend >= 0 ? '+' : ''}${fmt1(cs.trend * 100)} %/30 T.` : ''})`;
+    }
   }
   if (e._seq !== my) return e; // neuere Berechnung läuft schon (z. B. Note geändert)
   e.market = market;
@@ -1946,7 +1960,7 @@ const emptyTrade = () => ({ give: [], val: {}, get: [], cashOut: null, cashIn: n
 let trade = emptyTrade();
 const saveTrade = () => kvSet('tradedraft', trade);
 async function loadTrade() { trade = (await kvGet('tradedraft', null)) || emptyTrade(); }
-const bookTabsHtml = () => `<div class="seg book-tabs"><button type="button" data-bt="ankauf" class="${bookTab === 'ankauf' ? 'on' : ''}">Ankauf</button><button type="button" data-bt="trade" class="${bookTab === 'trade' ? 'on' : ''}">Trade${trade.give.length || trade.get.length ? ` · ${trade.give.length}:${trade.get.length}` : ''}</button></div>`;
+const bookTabsHtml = () => `<div class="seg book-tabs"><button type="button" data-bt="ankauf" class="${bookTab === 'ankauf' ? 'on' : ''}">Ankauf</button><button type="button" data-bt="trade" class="${bookTab === 'trade' ? 'on' : ''}">Trade${trade.give.length || trade.get.length ? ` · ${trade.give.length}:${trade.get.length}` : ''}</button><button type="button" data-bt="comps" class="${bookTab === 'comps' ? 'on' : ''}">Verkäufe</button></div>`;
 function bindTabs(el) {
   $$('[data-bt]', el).forEach((b) => b.addEventListener('click', () => { bookTab = b.dataset.bt; renderBook(); window.scrollTo(0, 0); }));
 }
@@ -2096,11 +2110,208 @@ function bindLibSel(el) {
   });
 }
 
+// ----- eBay-Verkäufe (eigene Vergleichsdaten) -----
+let comps = [];
+let compsCorrOn = true;
+let compDraft = null;
+const saveComps = () => kvSet('comps', comps);
+async function loadComps() { comps = (await kvGet('comps', [])) || []; compsCorrOn = (await kvGet('compsCorr', true)) !== false; }
+const compNorm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+const gradeKey = (note) => { const g = gradeOf(note); return g ? `${g.company} ${g.grade}` : 'Roh'; };
+const compKey = (x) => `${x.cardId || compNorm(x.name) + '#' + compNorm(x.nr)}|${gradeKey(x.note)}`;
+const compsFor = (e) => { const k = compKey(e); const kn = `${compNorm(e.name) + '#' + compNorm(e.nr)}|${gradeKey(e.note)}`; return comps.filter((c) => compKey(c) === k || (!c.cardId || !e.cardId) && `${compNorm(c.name) + '#' + compNorm(c.nr)}|${gradeKey(c.note)}` === kn); };
+/** Gewichteter Median (Halbwertszeit 30 Tage) + Trend aus gewichteter Regression. */
+function compsStat(list) {
+  if (!list.length) return null;
+  const now = Date.now(), D = 864e5;
+  const pts = list.map((c) => ({ p: c.preis, t: c.datum, w: Math.pow(0.5, Math.max(0, (now - c.datum) / D) / 30) })).sort((a, b) => a.p - b.p);
+  const W = pts.reduce((a, x) => a + x.w, 0);
+  let acc = 0, med = pts[0].p;
+  for (const x of pts) { acc += x.w; if (acc >= W / 2) { med = x.p; break; } }
+  let trend = null;
+  if (pts.length >= 3) {
+    const mt = pts.reduce((a, x) => a + x.w * x.t, 0) / W, mp = pts.reduce((a, x) => a + x.w * x.p, 0) / W;
+    const cov = pts.reduce((a, x) => a + x.w * (x.t - mt) * (x.p - mp), 0), vt = pts.reduce((a, x) => a + x.w * (x.t - mt) ** 2, 0);
+    if (vt > 0 && mp > 0) trend = ((cov / vt) * 30 * D) / mp;
+  }
+  const dates = list.map((c) => c.datum);
+  return { n: list.length, value: med, min: pts[0].p, max: pts[pts.length - 1].p, trend, last: Math.max(...dates), first: Math.min(...dates) };
+}
+/** Preiskorrektur: Median aus (eBay-Wert ÷ automatischer Wert) über Rohkarten mit beiden Werten. */
+function compsCorrection() {
+  const groups = {};
+  comps.forEach((c) => { if (gradeKey(c.note) === 'Roh' && c.auto) (groups[compKey(c)] = groups[compKey(c)] || []).push(c); });
+  const ratios = Object.values(groups).map((g) => { const s = compsStat(g); const autos = g.map((c) => c.auto).sort((a, b) => a - b); return s.value / autos[Math.floor(autos.length / 2)]; }).filter((r) => r > 0.05 && r < 20).sort((a, b) => a - b);
+  if (ratios.length < 2) return { factor: null, n: ratios.length };
+  const m = ratios.length % 2 ? ratios[(ratios.length - 1) / 2] : (ratios[ratios.length / 2 - 1] + ratios[ratios.length / 2]) / 2;
+  return { factor: m, n: ratios.length };
+}
+function spark(list) {
+  if (list.length < 2) return '';
+  const xs = list.map((c) => c.datum), ys = list.map((c) => c.preis);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const W = 120, H = 34;
+  const pts = [...list].sort((a, b) => a.datum - b.datum).map((c) => `${x1 > x0 ? ((c.datum - x0) / (x1 - x0)) * (W - 4) + 2 : W / 2},${y1 > y0 ? H - 3 - ((c.preis - y0) / (y1 - y0)) * (H - 6) : H / 2}`);
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" aria-hidden="true"><polyline points="${pts.join(' ')}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>${pts.map((p) => `<circle cx="${p.split(',')[0]}" cy="${p.split(',')[1]}" r="2" fill="currentColor"/>`).join('')}</svg>`;
+}
+/** Zeilen wie „12.11. 45,00 Auktion“ oder „2026-11-12 45.00“. */
+function parseCompLines(text) {
+  const out = [], y = new Date().getFullYear();
+  for (const line of String(text || '').split(/\n+/)) {
+    let d = null, rest = line;
+    let m = line.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (m) { d = new Date(+m[1], +m[2] - 1, +m[3]); rest = line.replace(m[0], ' '); }
+    else if ((m = line.match(/(\d{1,2})\.(\d{1,2})\.(\d{2,4})?/))) { const yy = m[3] ? (m[3].length === 2 ? 2000 + +m[3] : +m[3]) : y; d = new Date(yy, +m[2] - 1, +m[1]); rest = line.replace(m[0], ' '); }
+    const nums = rest.match(/\d+(?:[.,]\d{1,2})?/g);
+    if (!d || !nums) continue;
+    const preis = parseNum(nums[nums.length - 1]);
+    if (preis == null || preis <= 0) continue;
+    if (d > new Date()) d.setFullYear(d.getFullYear() - 1);
+    out.push({ datum: d.getTime() + 12 * 36e5, preis, art: /auktion|auction/i.test(line) ? 'Auktion' : /sofort|bin|festpreis/i.test(line) ? 'Sofortkauf' : '' });
+  }
+  return out;
+}
+const todayIso = () => new Date().toISOString().slice(0, 10);
+
+function renderComps(el) {
+  compDraft = compDraft || { name: '', nr: '', note: 'Roh', cardId: null, cardLang: null, image: null, preis: null, datum: todayIso(), art: 'Sofortkauf', paste: '' };
+  const d = compDraft;
+  const corr = compsCorrection();
+  const groups = {};
+  comps.forEach((c) => (groups[compKey(c)] = groups[compKey(c)] || []).push(c));
+  const list = Object.values(groups).map((g) => [g, compsStat(g)]).sort((a, b) => b[1].last - a[1].last);
+  el.innerHTML = `${bookTabsHtml()}
+    <div class="card">
+      <div class="hero">
+        <div class="lbl">Preiskorrektur aus deinen eBay-Verkäufen</div>
+        <div class="val">${corr.factor != null ? `${corr.factor >= 1 ? '+' : ''}${fmt1((corr.factor - 1) * 100)} %` : '–'}</div>
+        <div class="sub">${corr.factor != null ? `Echte Verkäufe liegen im Mittel ${fmt1(Math.abs(corr.factor - 1) * 100)} % ${corr.factor >= 1 ? 'über' : 'unter'} den automatischen Preisen (${corr.n} Karten)` : `Ab 2 Rohkarten mit Verkäufen wird verglichen (bisher ${corr.n})`}</div>
+      </div>
+      ${corr.factor != null ? `<label class="check"><input type="checkbox" id="c-corr" ${compsCorrOn ? 'checked' : ''} /> Korrektur auf automatische Preise im Ankauf anwenden</label>` : ''}
+      <p class="date">Karten mit eigenen Verkäufen nutzen im Ankauf, im Trade und in der Bibliothek direkt diesen Wert. Neuere Verkäufe zählen mehr (Halbwertszeit 30 Tage).</p>
+    </div>
+    <div class="card">
+      <h2>Verkauf eintragen</h2>
+      <div class="book-form">
+        <label class="wide ac-wrap">Karte<input id="c-name" value="${esc(d.name)}" placeholder="Tippen, z. B. Walrein ex" autocomplete="off" /><div id="c-ac" class="ac-list hidden"></div></label>
+        ${d.cardId ? `<div class="wide picked">${d.image ? img(d.image, 'low', d.name) : ''}<span>${esc(d.match || d.name)}</span><button type="button" class="x" id="c-unpick" aria-label="Auswahl lösen">×</button></div>` : `<label class="wide">Nummer<input id="c-nr" value="${esc(d.nr)}" placeholder="optional, 89/92" /></label>`}
+        <div class="wide grade-chips">${['Roh', 'PSA 10', 'PSA 9', 'PSA 8', 'PSA 7', 'CGC 9.5', 'CGC 7.5', 'BGS 9.5'].map((g) => `<button type="button" data-cg="${g}" class="${gradeKey(d.note) === (g === 'Roh' ? 'Roh' : gradeKey(g)) ? 'on' : ''}">${g}</button>`).join('')}</div>
+        <label>Note<input id="c-note" list="b-notes" value="${esc(d.note)}" /></label>
+        <datalist id="b-notes">${NOTE_LIST.map((x) => `<option value="${x}">`).join('')}</datalist>
+        <label>Art<select id="c-art">${['Sofortkauf', 'Auktion', 'Preisvorschlag'].map((a) => `<option ${a === d.art ? 'selected' : ''}>${a}</option>`).join('')}</select></label>
+        <label>Preis €<input id="c-preis" inputmode="decimal" value="${d.preis != null ? n2(d.preis) : ''}" placeholder="z. B. 54" /></label>
+        <label>Datum<input id="c-date" type="date" value="${d.datum}" max="${todayIso()}" /></label>
+        <button class="primary wide" id="c-add">Verkauf speichern</button>
+        <details class="wide"><summary>Mehrere auf einmal einfügen</summary>
+          <textarea id="c-paste" rows="4" placeholder="Je Zeile Datum und Preis, z. B.&#10;12.11. 45,00 Auktion&#10;08.11.2026 52 Sofortkauf">${esc(d.paste || '')}</textarea>
+          <button id="c-paste-add" class="block">Alle Zeilen speichern</button>
+        </details>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Deine Verkaufsdaten · ${comps.length}</h2>
+      ${list.length ? list.map(([g, s]) => {
+        const c0 = g[0];
+        const auto = g.filter((c) => c.auto).map((c) => c.auto);
+        const autoM = auto.length ? auto.sort((a, b) => a - b)[Math.floor(auto.length / 2)] : null;
+        return `<div class="comp-group">
+          <div class="comp-head">${c0.image ? img(c0.image, 'low', c0.name) : '<div class="thumb-ph">–</div>'}
+            <div><div class="n">${esc(c0.name)}${c0.nr ? ' <span class="meta">' + esc(c0.nr) + '</span>' : ''}</div>
+              <div class="meta"><span class="${gradeKey(c0.note) === 'Roh' ? '' : 'grade-badge'}">${esc(gradeKey(c0.note))}</span> · ${s.n} Verkauf${s.n > 1 ? 'e' : ''}${s.n > 1 ? ` · ${eur(s.min)}–${eur(s.max)}` : ''}</div>
+              <div class="meta">${s.trend != null ? `Trend <b class="${clsOf(s.trend)}">${s.trend >= 0 ? '+' : ''}${fmt1(s.trend * 100)} %</b> pro 30 Tage · ` : ''}zuletzt ${new Date(s.last).toLocaleDateString('de-DE')}${autoM != null ? ` · automatisch ${eur(autoM)}` : ''}</div></div>
+            <div class="right"><span class="meta">Wert</span><b>${eur(s.value)}</b>${spark(g)}</div>
+          </div>
+          <details><summary class="meta">Einzelne Verkäufe</summary>
+            ${[...g].sort((a, b) => b.datum - a.datum).map((c) => `<div class="sale-line"><span>${new Date(c.datum).toLocaleDateString('de-DE')} · ${esc(c.art || '–')}</span><b>${eur(c.preis)}</b><button class="x" data-cdel="${c.uid}" aria-label="Löschen">×</button></div>`).join('')}
+          </details>
+        </div>`;
+      }).join('') : '<p class="empty">Noch keine Verkäufe eingetragen. Bei eBay „Verkaufte Artikel“ filtern und die letzten Preise hier eintragen.</p>'}
+    </div>`;
+  bindTabs(el);
+  bindComps(el);
+}
+
+function bindComps(el) {
+  const d = compDraft;
+  const read = () => {
+    d.name = $('#c-name', el).value.trim();
+    const nr = $('#c-nr', el); if (nr) d.nr = nr.value.trim();
+    d.note = $('#c-note', el).value.trim() || 'Roh';
+    d.art = $('#c-art', el).value; d.preis = parseNum($('#c-preis', el).value); d.datum = $('#c-date', el).value || todayIso();
+    const p = $('#c-paste', el); if (p) d.paste = p.value;
+  };
+  const cb = $('#c-corr', el);
+  if (cb) cb.addEventListener('change', () => { compsCorrOn = cb.checked; kvSet('compsCorr', compsCorrOn); toast(compsCorrOn ? 'Korrektur aktiv' : 'Korrektur aus'); });
+  $$('[data-cg]', el).forEach((b) => b.addEventListener('click', () => { read(); d.note = b.dataset.cg; renderBook(); }));
+  const un = $('#c-unpick', el);
+  if (un) un.addEventListener('click', () => { read(); Object.assign(d, { cardId: null, image: null, match: '' }); renderBook(); });
+  $$('[data-cdel]', el).forEach((b) => b.addEventListener('click', () => {
+    const i = comps.findIndex((c) => c.uid === b.dataset.cdel); const [c] = comps.splice(i, 1);
+    saveComps(); renderBook(); toastUndo('Verkauf gelöscht', () => { comps.splice(i, 0, c); saveComps(); renderBook(); });
+  }));
+  // Autovervollständigung
+  const q = $('#c-name', el), ac = $('#c-ac', el);
+  let t = null, seq = 0;
+  q.addEventListener('input', () => {
+    clearTimeout(t);
+    if (d.cardId) { d.cardId = null; d.image = null; d.match = ''; }
+    const s = q.value.trim();
+    if (s.length < 2) { ac.classList.add('hidden'); return; }
+    t = setTimeout(async () => {
+      const my = ++seq;
+      ac.innerHTML = '<div class="ac-item meta">Suche …</div>'; ac.classList.remove('hidden');
+      let list = [];
+      try { list = await searchSmart(settings.searchLang, s, langAvail); } catch {}
+      if (my !== seq) return;
+      ac.innerHTML = list.slice(0, 8).map((x, i) => `<button type="button" class="ac-item" data-i="${i}">${img(x.image, 'low', x.name)}<span><b>${esc(x.name)}</b><span class="meta">${esc(x.setName || '')} · ${esc(x.localId)}${x.setCount ? '/' + x.setCount.official : ''}</span></span></button>`).join('') || '<div class="ac-item meta">Keine Treffer</div>';
+      $$('.ac-item[data-i]', ac).forEach((b) => b.addEventListener('mousedown', (ev) => ev.preventDefault()));
+      $$('.ac-item[data-i]', ac).forEach((b) => b.addEventListener('click', () => {
+        const x = list[+b.dataset.i];
+        read();
+        Object.assign(d, { name: x.name, nr: `${x.localId}${x.setCount ? '/' + x.setCount.official : ''}`, cardId: x.id, cardLang: x.lang || settings.searchLang, image: x.image || null, match: `${x.name} · ${x.setName || ''} ${x.localId}` });
+        renderBook();
+        const pi = $('#c-preis'); if (pi) pi.focus();
+      }));
+    }, 350);
+  });
+  q.addEventListener('blur', () => setTimeout(() => ac.classList.add('hidden'), 150));
+  // automatischer Vergleichswert (nur Rohkarten, für die Preiskorrektur)
+  const autoFor = async () => {
+    if (gradeKey(d.note) !== 'Roh' || (!d.cardId && !d.name)) return null;
+    const tmp = { ...newDraft('karte'), name: d.name, nr: d.nr, cardId: d.cardId, cardLang: d.cardLang, note: 'NM', lang: 'en', _noComps: true };
+    try { await suggestPrice(tmp); } catch {}
+    return tmp.market ?? null;
+  };
+  const store = async (rows) => {
+    const auto = await autoFor();
+    rows.forEach((r) => comps.push({ uid: uid(), name: d.name, nr: d.nr, cardId: d.cardId, cardLang: d.cardLang, image: d.image, note: gradeKey(d.note) === 'Roh' ? 'Roh' : gradeKey(d.note), ...r, auto }));
+    saveComps();
+    const s = compsStat(compsFor({ ...d, note: gradeKey(d.note) === 'Roh' ? 'Roh' : d.note }));
+    d.preis = null; d.paste = '';
+    renderBook();
+    toast(`${rows.length} Verkauf${rows.length > 1 ? 'e' : ''} gespeichert${s ? ' · Wert jetzt ' + eur(s.value) : ''}`);
+  };
+  $('#c-add', el).addEventListener('click', async () => {
+    read();
+    if (!d.name) return toast('Karte eintragen');
+    if (d.preis == null || d.preis <= 0) return toast('Preis eintragen');
+    await store([{ preis: d.preis, datum: new Date(d.datum + 'T12:00').getTime(), art: d.art }]);
+  });
+  $('#c-paste-add', el).addEventListener('click', async () => {
+    read();
+    if (!d.name) return toast('Erst die Karte wählen');
+    const rows = parseCompLines(d.paste);
+    if (!rows.length) return toast('Keine Zeile mit Datum und Preis erkannt');
+    await store(rows.map((r) => ({ ...r, art: r.art || d.art })));
+  });
+}
+
 // ----- Seite -----
 function renderBook() {
   const el = $('#book');
   if (!el) return;
   if (bookTab === 'trade') return renderTrade(el);
+  if (bookTab === 'comps') return renderComps(el);
   draft = draft || newDraft();
   const d = draft;
   const st = book.map((e) => [e, bookStats(e)]);
