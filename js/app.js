@@ -1710,7 +1710,7 @@ async function loadBook() {
   await loadComps();
 }
 const NOTE_COND = { MT: 'MT', NM: 'NM', EX: 'EX', GD: 'GD', LP: 'LP', PL: 'PL', PO: 'PO' };
-const NOTE_LIST = ['MT', 'NM', 'EX', 'GD', 'LP', 'PL', 'PO', 'PSA 10', 'PSA 9', 'PSA 8', 'PSA 7', 'BGS 9.5', 'BGS 9', 'CGC 10', 'CGC 9.5'];
+const NOTE_LIST = ['MT', 'NM', 'EX', 'GD', 'LP', 'PL', 'PO', 'PSA 10', 'PSA 9', 'PSA 8', 'PSA 7', 'PSA 6', 'BGS 10', 'BGS 9.5', 'BGS 9', 'CGC 10', 'CGC 9.5', 'CGC 9', 'CGC 8', 'SGC 10', 'SGC 9', 'ACE 10', 'ACE 9', 'ACE 8', 'ACE 7', 'TAG 10', 'TAG 9', 'TAG 8', 'AGS 10', 'AGS 9', 'GMA 10', 'GMA 9', 'HGA 10', 'HGA 9', 'PCA 10', 'PCA 9', 'ARS 10', 'KSA 10'];
 const SEALED_LIST = ['OVP versiegelt', 'OVP, Folie beschädigt', 'geöffnet'];
 const newDraft = (typ = 'karte') => ({ typ, name: '', nr: '', note: typ === 'sealed' ? 'OVP versiegelt' : 'NM', lang: tcgLangToLf(settings.searchLang) || 'de', menge: 1, ek: null, marketIn: '', vorschlag: null, manual: false, notiz: '', cardId: null, cardLang: null, image: null, market: null, vorschlagInfo: '' });
 
@@ -1732,7 +1732,17 @@ function parseRange(v) {
   const n = parseNum(v);
   return n != null ? { mid: n, min: null, max: null } : null;
 }
-const gradeOf = (note) => { const m = String(note || '').match(/^\s*(PSA|BGS|CGC|SGC)\s*(\d+(?:[.,]5)?)/i); return m ? { company: m[1].toUpperCase(), grade: m[2].replace(',', '.') } : null; };
+const GRADERS = ['PSA', 'BGS', 'CGC', 'SGC', 'ACE', 'TAG', 'AGS', 'GMA', 'HGA', 'PCA', 'ARS', 'KSA', 'MNT', 'PGS', 'BRG', 'ISA', 'RCG', 'CCC', 'EGS'];
+const GRADER_ALIAS = { BECKETT: 'BGS', BVG: 'BGS' };
+/** „PSA 9“, „ace 7“, „TAG 8.5“, „Beckett 9,5“ … → Firma + Note. Unbekannte Kürzel mit Zahl gelten auch als gegradet. */
+const gradeOf = (note) => {
+  const m = String(note || '').trim().match(/^([A-Za-z]{2,8})\.?\s*(\d{1,2}(?:[.,]5)?)\b/);
+  if (!m) return null;
+  const co = GRADER_ALIAS[m[1].toUpperCase()] || m[1].toUpperCase();
+  const g = parseFloat(m[2].replace(',', '.'));
+  if (!(g >= 1 && g <= 10)) return null;
+  return { company: co, grade: String(g), known: GRADERS.includes(co) };
+};
 const cmLink = (name) => `https://www.cardmarket.com/de/Pokemon/Products/Search?searchString=${encodeURIComponent(name || '')}`;
 
 /** Marktwert je Stück + Verkaufsvorschlag je Stück. Eigener Marktwert (auch Spanne 8-18) hat Vorrang, sonst TCGdex. Manuellen Preis nie überschreiben. */
@@ -1779,7 +1789,7 @@ async function suggestPrice(e) {
               const usd = hit ? hit.smart ?? hit.median ?? hit.avg : null;
               if (usd != null && fx?.rate) { market = usd * fx.rate; e.gradedSrc = `eBay-Verkäufe ${gr.company} ${gr.grade}${hit.count ? ' (' + hit.count + ')' : ''}`; }
             } catch {}
-            if (market == null) note = `${gr.company} ${gr.grade}: kein Graded-Preis gefunden, bitte Verkaufspreis für ${gr.company} ${gr.grade} als Marktwert eintragen${raw != null ? ` (roh wäre ${eur(raw)})` : ''}.`;
+            if (market == null) note = `${gr.company} ${gr.grade}: kein Graded-Preis gefunden. eBay-Verkäufe eintragen (auch andere Noten/Firmen werden umgerechnet) oder Marktwert selbst eintragen${raw != null ? ` (roh wäre ${eur(raw)})` : ''}.`;
           }
         }
       }
@@ -2116,7 +2126,7 @@ function bindLibSel(el) {
 let comps = [];
 let compsCorrOn = true;
 let compDraft = null;
-const saveComps = () => kvSet('comps', comps);
+const saveComps = () => { kvSet('comps', comps); scheduleRefresh(); };
 async function loadComps() {
   comps = (await kvGet('comps', [])) || []; compsCorrOn = (await kvGet('compsCorr', true)) !== false;
   const gc = await kvGet('gradeCurve', null);
@@ -2125,7 +2135,7 @@ async function loadComps() {
 const compNorm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
 const gradeKey = (note) => { const g = gradeOf(note); return g ? `${g.company} ${g.grade}` : 'Roh'; };
 const compKey = (x) => `${x.cardId || compNorm(x.name) + '#' + compNorm(x.nr)}|${gradeKey(x.note)}`;
-const GRADE_CURVE_DEF = { psa: { 10: 1, 9: 0.45, 8: 0.28, 7: 0.21, 6: 0.17, 5: 0.14, 4: 0.12, 3: 0.1, 2: 0.09, 1: 0.08 }, raw: 0.22, co: { PSA: 1, BGS: 0.9, CGC: 0.75, SGC: 0.75 } };
+const GRADE_CURVE_DEF = { psa: { 10: 1, 9: 0.45, 8: 0.28, 7: 0.21, 6: 0.17, 5: 0.14, 4: 0.12, 3: 0.1, 2: 0.09, 1: 0.08 }, raw: 0.22, co: { PSA: 1, BGS: 0.9, CGC: 0.75, SGC: 0.75, ACE: 0.7, TAG: 0.75, AGS: 0.6, GMA: 0.55, HGA: 0.6, PCA: 0.6, ARS: 0.65, KSA: 0.55, sonstige: 0.6 } };
 let gradeCurve = JSON.parse(JSON.stringify(GRADE_CURVE_DEF));
 /** Wert einer Note relativ zu PSA 10 (Roh = ungegradet NM). Halbe Noten geometrisch interpoliert, Firma als Faktor. */
 function gradeIdx(note) {
@@ -2133,7 +2143,7 @@ function gradeIdx(note) {
   if (!g) return gradeCurve.raw;
   const x = parseFloat(g.grade), lo = Math.floor(x), hi = Math.ceil(x), p = gradeCurve.psa;
   const a = p[lo] ?? 0.08, b = p[hi] ?? a;
-  return (lo === hi ? a : Math.sqrt(a * b)) * (gradeCurve.co[g.company] ?? 0.8);
+  return (lo === hi ? a : Math.sqrt(a * b)) * (gradeCurve.co[g.company] ?? gradeCurve.co.sonstige ?? 0.6);
 }
 const fx2 = (v) => v.toLocaleString('de-DE', { maximumFractionDigits: 2 });
 const gradeFactor = (from, to) => gradeIdx(to) / gradeIdx(from);
@@ -2229,7 +2239,7 @@ function renderComps(el) {
           ${[10, 9, 8, 7, 6, 5, 4, 3].map((g) => `<label>PSA ${g}<input data-gc="psa.${g}" inputmode="decimal" value="${fmt1(gradeCurve.psa[g] * 100)}" /></label>`).join('')}
           <label>Roh (NM)<input data-gc="raw" inputmode="decimal" value="${fmt1(gradeCurve.raw * 100)}" /></label>
         </div>
-        <div class="gc-grid">${['PSA', 'BGS', 'CGC', 'SGC'].map((k) => `<label>${k}<input data-gc="co.${k}" inputmode="decimal" value="${fmt1(gradeCurve.co[k] * 100)}" /></label>`).join('')}</div>
+        <div class="gc-grid">${['PSA', 'BGS', 'CGC', 'SGC', 'ACE', 'TAG', 'AGS', 'GMA', 'HGA', 'PCA', 'ARS', 'KSA', 'sonstige'].map((k) => `<label>${k === 'sonstige' ? 'andere Firma' : k}<input data-gc="co.${k}" inputmode="decimal" value="${fmt1(gradeCurve.co[k] * 100)}" /></label>`).join('')}</div>
         <p class="date">Umrechnung z. B.: PSA 9 → PSA 8 ×${fx2(gradeFactor('PSA 9', 'PSA 8'))} · PSA 9 → PSA 10 ×${fx2(gradeFactor('PSA 9', 'PSA 10'))} · CGC 9 → PSA 9 ×${fx2(gradeFactor('CGC 9', 'PSA 9'))} · BGS 9.5 → PSA 10 ×${fx2(gradeFactor('BGS 9.5', 'PSA 10'))} · Roh → PSA 9 ×${fx2(gradeFactor('Roh', 'PSA 9'))}</p>
         <button class="small" id="gc-reset">Standardwerte</button>
       </details>
@@ -2240,7 +2250,7 @@ function renderComps(el) {
         <label class="wide ac-wrap">Karte<input id="c-name" value="${esc(d.name)}" placeholder="Tippen, z. B. Walrein ex" autocomplete="off" /><div id="c-ac" class="ac-list hidden"></div></label>
         ${d.cardId ? `<div class="wide picked">${d.image ? img(d.image, 'low', d.name) : ''}<span>${esc(d.match || d.name)}</span><button type="button" class="x" id="c-unpick" aria-label="Auswahl lösen">×</button></div>` : `<label class="wide">Nummer<input id="c-nr" value="${esc(d.nr)}" placeholder="optional, 89/92" /></label>`}
         <p class="date wide">Note des verkauften Artikels, darf von deiner Karte abweichen:</p>
-        <div class="wide grade-chips">${['Roh', 'PSA 10', 'PSA 9', 'PSA 8', 'PSA 7', 'CGC 9.5', 'CGC 9', 'CGC 7.5', 'BGS 9.5', 'BGS 9'].map((g) => `<button type="button" data-cg="${g}" class="${gradeKey(d.note) === (g === 'Roh' ? 'Roh' : gradeKey(g)) ? 'on' : ''}">${g}</button>`).join('')}</div>
+        <div class="wide grade-chips">${['Roh', 'PSA 10', 'PSA 9', 'PSA 8', 'PSA 7', 'CGC 9.5', 'CGC 9', 'CGC 7.5', 'BGS 9.5', 'BGS 9', 'ACE 10', 'ACE 9', 'ACE 7', 'TAG 10'].map((g) => `<button type="button" data-cg="${g}" class="${gradeKey(d.note) === (g === 'Roh' ? 'Roh' : gradeKey(g)) ? 'on' : ''}">${g}</button>`).join('')}</div>
         <label>Note<input id="c-note" list="b-notes" value="${esc(d.note)}" /></label>
         <datalist id="b-notes">${NOTE_LIST.map((x) => `<option value="${x}">`).join('')}</datalist>
         <label>Art<select id="c-art">${['Sofortkauf', 'Auktion', 'Preisvorschlag'].map((a) => `<option ${a === d.art ? 'selected' : ''}>${a}</option>`).join('')}</select></label>
@@ -2290,12 +2300,12 @@ function bindComps(el) {
     if (v == null || v <= 0) return toast('Wert in % eintragen');
     const [a, b] = inp.dataset.gc.split('.');
     if (b) gradeCurve[a][b] = v / 100; else gradeCurve[a] = v / 100;
-    kvSet('gradeCurve', gradeCurve); renderBook();
+    kvSet('gradeCurve', gradeCurve); renderBook(); scheduleRefresh();
   }));
   const gr0 = $('#gc-reset', el);
-  if (gr0) gr0.addEventListener('click', () => { gradeCurve = JSON.parse(JSON.stringify(GRADE_CURVE_DEF)); kvSet('gradeCurve', null); renderBook(); });
+  if (gr0) gr0.addEventListener('click', () => { gradeCurve = JSON.parse(JSON.stringify(GRADE_CURVE_DEF)); kvSet('gradeCurve', null); renderBook(); scheduleRefresh(); });
   const cb = $('#c-corr', el);
-  if (cb) cb.addEventListener('change', () => { compsCorrOn = cb.checked; kvSet('compsCorr', compsCorrOn); toast(compsCorrOn ? 'Korrektur aktiv' : 'Korrektur aus'); });
+  if (cb) cb.addEventListener('change', () => { compsCorrOn = cb.checked; kvSet('compsCorr', compsCorrOn); scheduleRefresh(); toast(compsCorrOn ? 'Korrektur aktiv' : 'Korrektur aus'); });
   $$('[data-cg]', el).forEach((b) => b.addEventListener('click', () => { read(); d.note = b.dataset.cg; renderBook(); }));
   const un = $('#c-unpick', el);
   if (un) un.addEventListener('click', () => { read(); Object.assign(d, { cardId: null, image: null, match: '' }); renderBook(); });
@@ -2379,7 +2389,7 @@ function lastSoldHtml(ref, id) {
       <button class="primary" data-lsadd aria-label="Verkauf hinzufügen">+</button>
       <label class="ls-n">Note des verkauften Artikels<input data-lsn list="ls-notes" value="${esc(gradeKey(ref.note))}" /></label>
     </div>
-    <datalist id="ls-notes">${['Roh', 'PSA 10', 'PSA 9', 'PSA 8', 'PSA 7', 'PSA 6', 'CGC 10', 'CGC 9.5', 'CGC 9', 'CGC 8.5', 'CGC 8', 'CGC 7.5', 'BGS 10', 'BGS 9.5', 'BGS 9', 'BGS 8.5', 'SGC 10', 'SGC 9'].map((x) => `<option value="${x}">`).join('')}</datalist>
+    <datalist id="ls-notes">${['Roh', 'PSA 10', 'PSA 9', 'PSA 8', 'PSA 7', 'PSA 6', 'CGC 10', 'CGC 9.5', 'CGC 9', 'CGC 8.5', 'CGC 8', 'CGC 7.5', 'BGS 10', 'BGS 9.5', 'BGS 9', 'BGS 8.5', 'SGC 10', 'SGC 9', 'ACE 10', 'ACE 9', 'ACE 8', 'ACE 7', 'TAG 10', 'TAG 9', 'TAG 8', 'AGS 10', 'GMA 10', 'HGA 10', 'PCA 10', 'ARS 10', 'KSA 10'].map((x) => `<option value="${x}">`).join('')}</datalist>
     <p class="date">Deine Karte: ${esc(gradeKey(ref.note))}. Verkäufe in anderer Note oder von anderer Grading-Firma werden über die Grading-Faktoren umgerechnet und zählen schwächer.</p>
   </div>`;
 }
@@ -2475,6 +2485,31 @@ function bindPsa(root, o, after) {
   });
 }
 
+// ----- Automatische Neuberechnung (Verkaufspreise, Gewinn, Rendite) -----
+let refreshTimer = null, refreshing = false;
+function scheduleRefresh(ms = 400) { clearTimeout(refreshTimer); refreshTimer = setTimeout(refreshBookPrices, ms); }
+/** Rechnet Marktwert und Vorschlag aller offenen Einträge neu. Manuelle Preise bleiben, Bildschirm nur neu zeichnen, wenn nicht gerade getippt wird. */
+async function refreshBookPrices() {
+  if (refreshing) return scheduleRefresh(800);
+  refreshing = true;
+  let changed = false;
+  const run = async (x) => {
+    const before = `${x.market}|${x.vorschlag}|${x.vorschlagInfo}`;
+    try { await suggestPrice(x); } catch {}
+    if (`${x.market}|${x.vorschlag}|${x.vorschlagInfo}` !== before) changed = true;
+  };
+  try {
+    for (const e of book) if (restOf(e) > 0 && (e.cardId || e.name || e.marketIn || e.psaEst != null)) await run(e);
+    for (const x of lot.items) await run(x);
+    for (const x of trade.get) await run(x);
+  } finally { refreshing = false; }
+  if (!changed) return;
+  saveBook(); saveLot(); saveTrade();
+  const a = document.activeElement;
+  const typing = a && /INPUT|TEXTAREA|SELECT/.test(a.tagName) && a.closest('#book');
+  if ($('#view-book')?.classList.contains('active') && !typing && !document.querySelector('.modal-ov')) renderBook();
+}
+
 // ----- Seite -----
 function renderBook() {
   const el = $('#book');
@@ -2514,7 +2549,7 @@ function renderBook() {
         <label>${sealed ? 'Zustand' : 'Note / Zustand'}<input id="b-note" list="${sealed ? 'b-sealed' : 'b-notes'}" value="${esc(d.note)}" /></label>
         <datalist id="b-notes">${NOTE_LIST.map((x) => `<option value="${x}">`).join('')}</datalist>
         <datalist id="b-sealed">${SEALED_LIST.map((x) => `<option value="${x}">`).join('')}</datalist>
-        ${sealed ? '' : `<div class="wide grade-chips">${['Roh', 'PSA 10', 'PSA 9', 'PSA 8', 'CGC 10', 'CGC 9.5', 'BGS 9.5'].map((g) => `<button type="button" data-gq="${g}" class="${(g === 'Roh' ? !gradeOf(d.note) : d.note === g) ? 'on' : ''}">${g}</button>`).join('')}</div>`}
+        ${sealed ? '' : `<div class="wide grade-chips">${['Roh', 'PSA 10', 'PSA 9', 'PSA 8', 'CGC 10', 'CGC 9.5', 'BGS 9.5', 'ACE 10', 'ACE 9', 'TAG 10'].map((g) => `<button type="button" data-gq="${g}" class="${(g === 'Roh' ? !gradeOf(d.note) : d.note === g) ? 'on' : ''}">${g}</button>`).join('')}</div>`}
         <label>Sprache${langSel('b-lang', d.lang)}</label>
         <label>Menge<input id="b-menge" inputmode="numeric" value="${m}" /></label>
         <label class="${sealed ? '' : 'wide'}">Gekauft für €${m > 1 ? ' (alle zusammen)' : ''}<input id="b-ek" inputmode="decimal" value="${d.ek != null ? n2(d.ek) : ''}" placeholder="${inLot ? 'leer = über Gesamt-/Paketpreis' : 'z. B. 40'}" /></label>
@@ -2559,8 +2594,8 @@ function bookRowHtml(e, s) {
       ${e.notiz ? `<div class="date">${esc(e.notiz)}</div>` : ''}
     </div>
     <div class="right">
-      ${s.done ? `<span class="meta">Gewinn</span><b class="${clsOf(s.gewinn)}">${signEur(s.gewinn)}</b>`
-        : `<span class="meta">Verkaufen für${m > 1 ? '/Stk' : ''}</span><b>${e.vorschlag != null ? eur(e.vorschlag) : '–'}</b>${e.vorschlag != null ? `<span class="meta ${clsOf(expProfit(ekU, e.vorschlag))}">~${eur(expProfit(ekU, e.vorschlag) * s.rest)}</span>` : ''}${s.gone ? `<span class="meta">bisher <b class="${clsOf(s.gewinn)}">${signEur(s.gewinn)}</b></span>` : ''}`}
+      ${s.done ? `<span class="meta">Gewinn</span><b class="${clsOf(s.gewinn)}">${signEur(s.gewinn)}</b>${e.ek ? `<span class="meta ${clsOf(s.gewinn)}">${s.gewinn >= 0 ? '+' : ''}${fmt1((s.gewinn / e.ek) * 100)} % Rendite</span>` : ''}`
+        : `<span class="meta">Verkaufen für${m > 1 ? '/Stk' : ''}</span><b>${e.vorschlag != null ? eur(e.vorschlag) : '–'}</b>${e.vorschlag != null ? `<span class="meta ${clsOf(expProfit(ekU, e.vorschlag))}">~${eur(expProfit(ekU, e.vorschlag) * s.rest)}${ekU > 0 ? ` · ${expProfit(ekU, e.vorschlag) >= 0 ? '+' : ''}${fmt1((expProfit(ekU, e.vorschlag) / ekU) * 100)} %` : ''}</span><span class="meta">${e.manual ? 'Preis fest' : 'Preis automatisch'}</span>` : ''}${s.gone ? `<span class="meta">bisher <b class="${clsOf(s.gewinn)}">${signEur(s.gewinn)}</b></span>` : ''}`}
     </div>
     ${editing ? `<div class="book-edit" data-edit="${e.uid}">
       ${e.photo ? `<img class="book-photo" src="${e.photo}" alt="Foto">` : ''}
@@ -3463,7 +3498,7 @@ function initGrading() {
   renderLangSelect();
   initGrading();
   loadCart();
-  loadBook();
+  loadBook().then(() => scheduleRefresh(2500));
   loadScan();
   try { inventory = await db.all('inventory'); } catch { inventory = []; }
   refreshState.last = await kvGet('lastRefresh', null);
