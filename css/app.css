@@ -591,3 +591,23 @@ label.check input { width: 18px; height: 18px; min-height: 0; }
 .psa-box input { background: var(--bg); }
 .psa-kpis { margin: 0; }
 .psa-kpis > div { background: var(--bg); }
+
+/* Verkaufen-Album */
+.top-actions { grid-template-columns: repeat(3, 1fr); }
+.sell-btn { background: var(--pos); }
+.sell-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.sell-selbtns { margin-bottom: 10px; }
+.sell-row { display: grid; grid-template-columns: 44px 1fr 28px; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--line); align-items: start; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.sell-row.selmode { grid-template-columns: 44px 1fr; cursor: pointer; }
+.sell-row .x { min-height: 28px; width: 28px; padding: 0; background: transparent; }
+.sell-row input { -webkit-user-select: text; user-select: text; }
+.sell-edit { grid-template-columns: 1fr 1fr; }
+.sell-edit label b { display: block; padding-top: 8px; font-size: 15px; }
+.src-badge { background: var(--sunken); border-radius: 6px; padding: 0 5px; font-size: 11px; }
+.offer-bar { position: sticky; bottom: 70px; z-index: 6; background: var(--bg); border: 1px solid var(--line); border-radius: 16px; padding: 10px 12px; box-shadow: 0 6px 24px rgba(0,0,0,.12); display: grid; gap: 6px; }
+.offer-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: end; }
+.offer-row input { font-size: 20px; font-weight: 600; }
+.offer-row button { min-height: 46px; }
+.offer-res { font-size: 14px; line-height: 1.5; }
+.book-row { -webkit-touch-callout: none; }
+.sell-row img, .sell-row .thumb-ph { width: 44px; border-radius: 4px; display: block; }

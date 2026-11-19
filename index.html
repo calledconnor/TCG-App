@@ -17,6 +17,7 @@
     <button id="nav-back" class="nav-back hidden" aria-label="Zurück">‹</button>
     <h1>Kartenwert</h1>
     <button id="cart-btn" class="cart-btn hidden" aria-label="Ankaufskorb"></button>
+    <button id="sell-btn" class="cart-btn sell-btn hidden" aria-label="Verkaufen-Album"></button>
     <span id="net-status" class="net" aria-live="polite"></span>
     <button id="opt-btn" class="opt-btn" aria-label="Optionen"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
   </header>
@@ -33,6 +34,7 @@
         <div class="grid2 top-actions">
           <button id="open-calc" class="small">Rechner</button>
           <button id="open-cart" class="small">Ankaufskorb</button>
+          <button id="open-sell" class="small">Verkaufen</button>
         </div>
         <div class="seg" role="tablist" id="search-mode">
           <button data-mode="name" class="on" role="tab">Name</button>
@@ -114,6 +116,12 @@
     <section id="view-cart" class="view" aria-label="Ankaufskorb">
       <h2 class="page-title">Ankaufskorb</h2>
       <div id="cart"></div>
+    </section>
+
+    <!-- VERKAUFEN -->
+    <section id="view-sell" class="view" aria-label="Verkaufen">
+      <h2 class="page-title">Verkaufen</h2>
+      <div id="sell"></div>
     </section>
 
     <!-- RECHNER -->

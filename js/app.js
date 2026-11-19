@@ -181,6 +181,7 @@ function show(view, { push = true, keepScroll = true } = {}) {
   if (view === 'inv') renderInventory();
   if (view === 'book') renderBook();
   if (view === 'cart') renderCart();
+  if (view === 'sell') renderSell();
   if (view === 'calc') renderCalc();
   if (view === 'settings') renderSettings();
   if (view === 'grade') grading && grading.refresh();
@@ -1371,6 +1372,7 @@ function renderBuy(r) {
     <div class="grid2" style="margin-top:12px">
       <button class="primary" id="buy-now">Gekauft für ${eur(pay)}</button>
       <button id="to-cart">In den Korb</button>
+      <button id="to-sell">Zum Verkaufen</button>
     </div>
     ${cfg.start > 0 ? `<p class="date">Im Pott ${eur(pfo.kasse)} · danach ${eur(pfo.kasse - pay)}</p>` : ''}`;
 
@@ -1393,6 +1395,10 @@ function renderBuy(r) {
   $('#buy-wo').addEventListener('change', (e) => { cur.buyWo = e.target.value; });
   $('#buy-art').addEventListener('change', (e) => { cur.buyArt = e.target.value; });
   $('#buy-now').addEventListener('click', () => buyNow(parseNum(payIn.value)));
+  $('#to-sell').addEventListener('click', () => {
+    const c = cur.card;
+    addToSell({ name: c.name, nr: `${c.localId}${c.set?.cardCount?.official ? '/' + c.set.cardCount.official : ''}`, cardId: c.id, cardLang: cur.lang, image: c.image || null, match: `${c.name} · ${c.set?.name || ''} ${c.localId}`, lang: cur.myLang, note: cur.myCond || 'NM', marketIn: r.brutto != null ? n2(r.brutto) : '', herkunft: 'Suche' });
+  });
   $('#to-cart').addEventListener('click', () => {
     const l80 = r.ladder.find((l) => l.highlight);
     addToCart(cur.last.ref, r, l80);
@@ -1538,6 +1544,8 @@ function updateCartBtn() {
   if (t.n) b.textContent = `Korb ${t.n} · ${eur(t.gesamt)}`;
 }
 $('#cart-btn').addEventListener('click', () => show('cart'));
+$('#sell-btn').addEventListener('click', () => show('sell'));
+$('#open-sell').addEventListener('click', () => show('sell'));
 $('#open-cart').addEventListener('click', () => show('cart'));
 $('#open-calc').addEventListener('click', () => show('calc'));
 
@@ -1718,7 +1726,7 @@ const pfOf = (k) => settings.platforms[k] || settings.platforms[settings.platfor
 const unitEk = (e) => (e.ek || 0) / (e.menge || 1);
 const soldN = (e) => e.sales.filter((s) => !s.inhalt).reduce((a, s) => a + s.n, 0);
 const restOf = (e) => Math.max(0, (e.menge || 1) - soldN(e) - (e.opened || 0));
-const saleNetto = (s) => (s.tausch ? s.preis * s.n : s.preis * s.n * (1 - pfOf(s.pf).provision)) - (s.versand || 0);
+const saleNetto = (s) => (s.tausch || s.direkt ? s.preis * s.n : s.preis * s.n * (1 - pfOf(s.pf).provision)) - (s.versand || 0);
 function bookStats(e) {
   const rest = restOf(e), gone = (e.menge || 1) - rest;
   const netto = e.sales.reduce((a, s) => a + saleNetto(s), 0);
@@ -2097,7 +2105,7 @@ function libSelHtml() {
   const ziel = sel.reduce((a, e) => a + (e.vorschlag || 0) * restOf(e), 0);
   return `<div class="lib-sel">
     <div class="meta">${sel.length} ausgewählt · Einkauf ${eur(ek)} · Ziel ${eur(ziel)}</div>
-    <div class="lib-sel-btns"><button data-selall="1">Alle</button><button data-selnone="1">Keine</button><button data-seltrade="1" class="primary" ${sel.length ? '' : 'disabled'}>Tauschen</button><button data-seldel="1" ${sel.length ? '' : 'disabled'}>Löschen</button></div>
+    <div class="lib-sel-btns"><button data-selall="1">Alle</button><button data-selnone="1">Keine</button><button data-seltrade="1" ${sel.length ? '' : 'disabled'}>Tauschen</button><button data-selsell="1" class="primary" ${sel.length ? '' : 'disabled'}>Verkaufen</button><button data-seldel="1" ${sel.length ? '' : 'disabled'}>Löschen</button></div>
   </div>`;
 }
 function bindLibSel(el) {
@@ -2106,6 +2114,11 @@ function bindLibSel(el) {
   const on = (sel, fn) => { const b = $(sel, el); if (b) b.addEventListener('click', fn); };
   on('[data-selall]', () => { book.forEach((e) => bookSel.add(e.uid)); renderBook(); });
   on('[data-selnone]', () => { bookSel.clear(); renderBook(); });
+  on('[data-selsell]', () => {
+    const ids = book.filter((e) => bookSel.has(e.uid) && restOf(e) > 0).map((e) => e.uid);
+    if (!ids.length) return toast('Keine der Karten ist noch auf Lager');
+    addBookToSell(ids); bookSel.clear(); selMode = false; show('sell');
+  });
   on('[data-seltrade]', () => {
     const ids = book.filter((e) => bookSel.has(e.uid) && restOf(e) > 0).map((e) => e.uid);
     if (!ids.length) return toast('Keine der Karten ist noch auf Lager');
@@ -2502,12 +2515,226 @@ async function refreshBookPrices() {
     for (const e of book) if (restOf(e) > 0 && (e.cardId || e.name || e.marketIn || e.psaEst != null)) await run(e);
     for (const x of lot.items) await run(x);
     for (const x of trade.get) await run(x);
+    for (const x of sell.items) if (x.src !== 'book') await run(x);
   } finally { refreshing = false; }
   if (!changed) return;
-  saveBook(); saveLot(); saveTrade();
+  saveBook(); saveLot(); saveTrade(); saveSell();
+  if ($('#view-sell')?.classList.contains('active') && !(document.activeElement && /INPUT|TEXTAREA/.test(document.activeElement.tagName))) renderSell();
   const a = document.activeElement;
   const typing = a && /INPUT|TEXTAREA|SELECT/.test(a.tagName) && a.closest('#book');
   if ($('#view-book')?.classList.contains('active') && !typing && !document.querySelector('.modal-ov')) renderBook();
+}
+
+// ---------- Verkaufen-Album: Karten aus Suche/Bewertung und Bibliothek, Preise prüfen, Angebot bewerten ----------
+let sell = { items: [], offer: null, rabatt: 0.1 };
+const sellSel = new Set();
+let sellSelMode = false;
+const saveSell = () => { kvSet('sellalbum', sell); updateSellBtn(); };
+async function loadSell() { sell = (await kvGet('sellalbum', null)) || { items: [], offer: null, rabatt: 0.1 }; updateSellBtn(); }
+function updateSellBtn() {
+  const b = $('#sell-btn');
+  if (!b) return;
+  const n = sellRows().length;
+  b.classList.toggle('hidden', !n);
+  if (n) b.textContent = `Verkaufen ${n}`;
+}
+function longPress(el, cb) {
+  let t = null;
+  el.addEventListener('touchstart', () => { t = setTimeout(() => { el.dataset.lp = '1'; if (navigator.vibrate) navigator.vibrate(20); cb(); }, 450); }, { passive: true });
+  ['touchend', 'touchmove', 'touchcancel'].forEach((ev) => el.addEventListener(ev, () => clearTimeout(t), { passive: true }));
+  el.addEventListener('contextmenu', (e) => e.preventDefault());
+}
+/** Zeilen: Bibliothekseinträge live, gezogene Karten direkt. */
+function sellRows() {
+  return sell.items.map((x) => {
+    const e = x.src === 'book' ? book.find((b) => b.uid === x.ref) : x;
+    if (!e || (x.src === 'book' && restOf(e) <= 0)) return null;
+    const ekU = x.src === 'book' ? unitEk(e) : x.ek ?? null;
+    return { x, e, ekU, market: e.market ?? null, vk: e.vorschlag ?? null };
+  }).filter(Boolean);
+}
+async function addToSell(card) {
+  if (sell.items.some((x) => x.src !== 'book' && x.cardId && x.cardId === card.cardId && x.note === card.note)) return toast('Schon im Verkaufen-Album');
+  const item = { ...newDraft('karte'), ...card, uid: uid(), src: 'pull', ek: card.ek ?? null, herkunft: card.herkunft || 'Booster', addedAt: Date.now() };
+  sell.items.push(item);
+  saveSell();
+  toast(`Zum Verkaufen gelegt (${sellRows().length})`);
+  await suggestPrice(item);
+  saveSell();
+  if ($('#view-sell')?.classList.contains('active')) renderSell();
+}
+function addBookToSell(uids) {
+  let n = 0;
+  uids.forEach((u) => { if (!sell.items.some((x) => x.src === 'book' && x.ref === u)) { sell.items.push({ uid: uid(), src: 'book', ref: u }); n++; } });
+  saveSell();
+  toast(n ? `${n} ins Verkaufen-Album` : 'Schon im Verkaufen-Album');
+}
+function sellCalc(rows) {
+  const pf = settings.platforms[settings.platform];
+  const markt = rows.reduce((a, r) => a + (r.market ?? r.vk ?? 0), 0);
+  const vkSum = rows.reduce((a, r) => a + (r.vk ?? r.market ?? 0), 0);
+  const withCost = rows.filter((r) => r.ekU != null);
+  const ek = withCost.reduce((a, r) => a + r.ekU, 0);
+  const nettoEinzeln = rows.reduce((a, r) => a + ((r.vk ?? r.market ?? 0) * (1 - pf.provision) - pf.versand), 0);
+  const o = sell.offer;
+  return {
+    n: rows.length, markt, vkSum, ek, withCost: withCost.length, nettoEinzeln,
+    bundle: roundPrice(vkSum * (1 - (sell.rabatt || 0))),
+    pctMarkt: o != null && markt > 0 ? o / markt : null,
+    pctVk: o != null && vkSum > 0 ? o / vkSum : null,
+    gewinn: o != null && withCost.length ? o - ek : null,
+    vsEinzeln: o != null ? o - nettoEinzeln : null,
+  };
+}
+function offerVerdict(c) {
+  if (c.pctMarkt == null) return '';
+  const p = c.pctMarkt;
+  const [cls, txt] = p >= 0.9 ? ['pos', 'Gutes Angebot'] : p >= 0.75 ? ['', 'Fair, Verhandlungsspielraum'] : ['neg', 'Zu wenig'];
+  return `<b class="${cls}">${txt}</b>`;
+}
+
+function renderSell() {
+  const el = $('#sell');
+  if (!el) return;
+  const rows = sellRows();
+  const selRows = rows.filter((r) => sellSel.has(r.x.uid));
+  const act = selRows.length ? selRows : rows;
+  const all = sellCalc(rows), c = sellCalc(act);
+  el.innerHTML = `
+    <div class="sell-top"><span class="meta">${rows.length} Karten${sellSelMode ? ` · ${selRows.length} ausgewählt` : ''}</span>${rows.length ? `<button class="small" id="s-selmode">${sellSelMode ? 'Fertig' : 'Auswählen'}</button>` : ''}</div>
+    ${sellSelMode ? `<div class="lib-sel-btns sell-selbtns"><button id="s-all">Alle</button><button id="s-none">Keine</button><button id="s-del" ${selRows.length ? '' : 'disabled'}>Entfernen</button><button id="s-trade" ${selRows.length ? '' : 'disabled'}>Tauschen</button></div>` : ''}
+    <div class="card">
+      <div class="kpis">
+        <div><span class="meta">Marktwert</span><b>${eur(all.markt)}</b></div>
+        <div><span class="meta">Verkaufspreise</span><b>${eur(all.vkSum)}</b></div>
+        <div><span class="meta">Einkauf</span><b>${all.withCost ? eur(all.ek) : '–'}</b><span class="meta">${rows.length - all.withCost ? `${rows.length - all.withCost} ohne Kosten (Booster)` : ''}</span></div>
+        <div><span class="meta">Bundle-Preis</span><b>${eur(all.bundle)}</b><span class="meta">${fmt1((sell.rabatt || 0) * 100)} % Mengenrabatt</span></div>
+      </div>
+      <label class="row"><span>Mengenrabatt Bundle %</span><input id="s-rab" inputmode="decimal" value="${fmt1((sell.rabatt || 0) * 100)}" style="max-width:90px" /></label>
+    </div>
+    <div class="card">
+      ${rows.length ? rows.map((r) => sellRowHtml(r)).join('') : `<p class="empty">Noch leer. In der Kartenbewertung „Zum Verkaufen“ antippen oder in der Ankauf-Bibliothek Karten auswählen (lange drücken) und „Zum Verkaufen“ wählen.</p>`}
+      <label class="ac-wrap" style="margin-top:12px">Gezogene Karte hinzufügen<input id="s-q" placeholder="Tippen, z. B. Pikachu ex" autocomplete="off" /><div id="s-ac" class="ac-list hidden"></div></label>
+      <datalist id="b-notes">${NOTE_LIST.map((x) => `<option value="${x}">`).join('')}</datalist>
+    </div>
+    <div class="offer-bar">
+      <div class="offer-row"><label>Angebot €${selRows.length ? ` für ${selRows.length} ausgewählte` : rows.length ? ' für alle' : ''}<input id="s-offer" inputmode="decimal" value="${sell.offer != null ? n2(sell.offer) : ''}" placeholder="Was bietet der Käufer?" /></label>
+        <button class="primary" id="s-sold" ${sell.offer != null && act.length ? '' : 'disabled'}>Verkauft</button></div>
+      <div class="offer-res" id="s-res">${offerResHtml(c)}</div>
+    </div>`;
+  bindSell(el, rows);
+}
+function offerResHtml(c) {
+  if (!c.n) return '';
+  if (sell.offer == null) return `<span class="meta">Marktwert ${eur(c.markt)} · Verkaufspreise ${eur(c.vkSum)} · Bundle ${eur(c.bundle)}</span>`;
+  return `<b>${fmt1(c.pctMarkt * 100)} %</b> vom Marktwert · ${fmt1(c.pctVk * 100)} % vom Verkaufspreis · ${offerVerdict(c)}<br>
+    <span class="meta">${c.gewinn != null ? `Gewinn ggü. Einkauf <b class="${clsOf(c.gewinn)}">${signEur(c.gewinn)}</b> · ` : 'ohne Einkaufskosten (Booster) · '}Einzeln verkauft netto ${eur(c.nettoEinzeln)} (${c.vsEinzeln >= 0 ? 'Angebot ' + eur(c.vsEinzeln) + ' besser' : eur(-c.vsEinzeln) + ' weniger, dafür sofort'})</span>`;
+}
+function sellRowHtml(r) {
+  const { x, e } = r;
+  const on = sellSel.has(x.uid);
+  const pct = sell.offer != null && r.market ? null : null;
+  return `<div class="sell-row ${on ? 'picked-row' : ''} ${sellSelMode ? 'selmode' : ''}" data-su="${x.uid}">
+    <div class="thumb-wrap">${thumbOf(e)}${sellSelMode ? `<span class="row-check ${on ? 'on' : ''}"></span>` : ''}</div>
+    <div class="sell-main">
+      <div class="n">${esc(e.name)}${e.nr ? ' <span class="meta">' + esc(e.nr) + '</span>' : ''}</div>
+      <div class="meta">${gradeOf(e.note) ? `<span class="grade-badge">${esc(e.note)}</span>` : esc(e.note || '')} · <span class="src-badge">${x.src === 'book' ? 'Bibliothek' : esc(x.herkunft || 'Booster')}</span>${r.ekU != null ? ` · Einkauf ${eur(r.ekU)}` : ' · ohne Kosten'}</div>
+      ${e.vorschlagInfo ? `<div class="date">${esc(e.vorschlagInfo)}</div>` : ''}
+      ${e.hinweis ? `<div class="date warn-soft">${esc(e.hinweis)}</div>` : ''}
+      <div class="lot-edit sell-edit">
+        <label>Note<input data-sf="note" list="b-notes" value="${esc(e.note || '')}" /></label>
+        <label>Wert €<input data-sf="marketIn" value="${esc(e.marketIn || '')}" placeholder="${r.market != null ? n2(r.market) : 'eintragen'}" /></label>
+        <label>Verkaufen für €<input data-sf="vorschlag" inputmode="decimal" value="${r.vk != null ? n2(r.vk) : ''}" /></label>
+        ${x.src !== 'book' ? `<label>Kosten €<input data-sf="ek" inputmode="decimal" value="${x.ek != null ? n2(x.ek) : ''}" placeholder="0 = Booster" /></label>` : `<label>Gewinn bei VK<b class="${clsOf(r.vk != null ? expProfit(r.ekU, r.vk) : 0)}">${r.vk != null ? signEur(expProfit(r.ekU, r.vk)) : '–'}</b></label>`}
+      </div>
+    </div>
+    ${sellSelMode ? '' : `<button class="x" data-sdel="${x.uid}" aria-label="Entfernen">×</button>`}
+  </div>`;
+}
+function bindSell(el, rows) {
+  const find = (u) => rows.find((r) => r.x.uid === u);
+  const on = (sel, fn) => { const b = $(sel, el); if (b) b.addEventListener('click', fn); };
+  on('#s-selmode', () => { sellSelMode = !sellSelMode; if (!sellSelMode) sellSel.clear(); renderSell(); });
+  on('#s-all', () => { rows.forEach((r) => sellSel.add(r.x.uid)); renderSell(); });
+  on('#s-none', () => { sellSel.clear(); renderSell(); });
+  on('#s-del', () => { sell.items = sell.items.filter((x) => !sellSel.has(x.uid)); sellSel.clear(); saveSell(); renderSell(); });
+  on('#s-trade', () => {
+    const ids = rows.filter((r) => sellSel.has(r.x.uid) && r.x.src === 'book').map((r) => r.x.ref);
+    if (!ids.length) return toast('Nur Karten aus der Bibliothek lassen sich tauschen');
+    trade.give = [...new Set([...trade.give, ...ids])]; saveTrade(); bookTab = 'trade'; sellSel.clear(); sellSelMode = false; show('book');
+  });
+  const rab = $('#s-rab', el);
+  rab.addEventListener('change', () => { const v = parseNum(rab.value); sell.rabatt = v != null ? Math.min(0.9, Math.max(0, v / 100)) : 0; saveSell(); renderSell(); });
+  const off = $('#s-offer', el);
+  off.addEventListener('input', () => {
+    sell.offer = parseNum(off.value);
+    const act = rows.filter((r) => sellSel.has(r.x.uid));
+    $('#s-res').innerHTML = offerResHtml(sellCalc(act.length ? act : rows));
+    $('#s-sold').disabled = sell.offer == null || !rows.length;
+  });
+  off.addEventListener('change', () => kvSet('sellalbum', sell));
+  // Zeilen: antippen im Auswahlmodus, lange drücken startet Auswahl
+  $$('.sell-row', el).forEach((row) => {
+    longPress(row, () => { sellSelMode = true; sellSel.add(row.dataset.su); renderSell(); });
+    row.addEventListener('click', (ev) => {
+      if (row.dataset.lp) { delete row.dataset.lp; return; }
+      if (!sellSelMode || ev.target.closest('input,button')) return;
+      const u = row.dataset.su; sellSel.has(u) ? sellSel.delete(u) : sellSel.add(u); renderSell();
+    });
+  });
+  $$('[data-sdel]', el).forEach((b) => b.addEventListener('click', () => { sell.items = sell.items.filter((x) => x.uid !== b.dataset.sdel); saveSell(); renderSell(); }));
+  $$('[data-sf]', el).forEach((inp) => inp.addEventListener('change', async () => {
+    const r = find(inp.closest('[data-su]').dataset.su), f = inp.dataset.sf;
+    const tgt = r.x.src === 'book' ? r.e : r.x;
+    if (f === 'ek') r.x.ek = parseNum(inp.value);
+    else if (f === 'vorschlag') { tgt.vorschlag = parseNum(inp.value); tgt.manual = tgt.vorschlag != null; }
+    else { tgt[f] = inp.value.trim(); if (f === 'marketIn' || f === 'note') { if (f === 'note' && gradeOf(tgt.note)) tgt.manual = false; await suggestPrice(tgt); } }
+    if (r.x.src === 'book') saveBook();
+    saveSell(); renderSell();
+  }));
+  // Verkauf zum Angebot: nach Marktwert aufteilen, in die Bibliothek buchen (Gesamttopf)
+  on('#s-sold', () => {
+    const act = rows.filter((r) => sellSel.has(r.x.uid));
+    const list = act.length ? act : rows;
+    if (sell.offer == null || !list.length) return;
+    if (!confirm(`${list.length} Karte${list.length > 1 ? 'n' : ''} für ${eur(sell.offer)} verkauft?`)) return;
+    const w = list.map((r) => r.market ?? r.vk ?? 1), sw = w.reduce((a, b) => a + b, 0) || list.length;
+    const now = Date.now();
+    list.forEach((r, i) => {
+      const preis = Math.round((sell.offer * (w[i] / sw)) * 100) / 100;
+      const sale = { n: 1, preis, versand: 0, pf: 'direkt', direkt: true, datum: now };
+      if (r.x.src === 'book') r.e.sales.push(sale);
+      else book.unshift(migrateEntry({ ...r.x, typ: 'karte', menge: 1, ek: r.x.ek ?? 0, uid: uid(), datum: now, sales: [sale], opened: 0, notiz: [r.x.notiz, r.x.ek ? '' : 'aus Booster gezogen'].filter(Boolean).join(' · ') }));
+    });
+    const done = new Set(list.map((r) => r.x.uid));
+    sell.items = sell.items.filter((x) => !done.has(x.uid));
+    sell.offer = null; sellSel.clear(); sellSelMode = false;
+    saveBook(); saveSell(); renderSell();
+    toast(`Verkauft · im Gesamttopf gebucht`);
+  });
+  // Gezogene Karte per Suche hinzufügen
+  const q = $('#s-q', el), ac = $('#s-ac', el);
+  let t = null, seq = 0;
+  q.addEventListener('input', () => {
+    clearTimeout(t);
+    const s = q.value.trim();
+    if (s.length < 2) { ac.classList.add('hidden'); return; }
+    t = setTimeout(async () => {
+      const my = ++seq;
+      ac.innerHTML = '<div class="ac-item meta">Suche …</div>'; ac.classList.remove('hidden');
+      let list = [];
+      try { list = await searchSmart(settings.searchLang, s, langAvail); } catch {}
+      if (my !== seq) return;
+      ac.innerHTML = list.slice(0, 8).map((x, i) => `<button type="button" class="ac-item" data-i="${i}">${img(x.image, 'low', x.name)}<span><b>${esc(x.name)}</b><span class="meta">${esc(x.setName || '')} · ${esc(x.localId)}${x.setCount ? '/' + x.setCount.official : ''}</span></span></button>`).join('') || '<div class="ac-item meta">Keine Treffer</div>';
+      $$('.ac-item[data-i]', ac).forEach((b) => b.addEventListener('mousedown', (ev) => ev.preventDefault()));
+      $$('.ac-item[data-i]', ac).forEach((b) => b.addEventListener('click', () => {
+        const x = list[+b.dataset.i];
+        addToSell({ name: x.name, nr: `${x.localId}${x.setCount ? '/' + x.setCount.official : ''}`, cardId: x.id, cardLang: x.lang || settings.searchLang, image: x.image || null, match: `${x.name} · ${x.setName || ''} ${x.localId}`, lang: tcgLangToLf(x.lang || settings.searchLang) || 'de', note: 'NM', herkunft: 'Booster' });
+        renderSell();
+      }));
+    }, 350);
+  });
+  q.addEventListener('blur', () => setTimeout(() => ac.classList.add('hidden'), 150));
 }
 
 // ----- Seite -----
@@ -2611,7 +2838,7 @@ function bookRowHtml(e, s) {
       </div>
       <label>Notiz<input data-f="notiz" value="${esc(e.notiz || '')}" /></label>
       <p class="date">${esc(e.vorschlagInfo || '')}${e.autoVorschlag != null && e.manual ? ` · berechnet wären ${eur(e.autoVorschlag)}` : ''}</p>
-      ${e.sales.length ? `<div class="sales">${e.sales.map((x, i) => `<div class="sale-line"><span>${x.inhalt ? 'Inhalt: ' : ''}${x.n}× ${eur(x.preis)} · Versand ${eur(x.versand || 0)} · ${x.tausch ? 'Tausch' + (x.gegen ? ' gegen ' + esc(x.gegen) : '') : esc(pfOf(x.pf).label)} · ${new Date(x.datum).toLocaleDateString('de-DE')}</span><b class="${clsOf(saleNetto(x))}">${eur(saleNetto(x))}</b><button class="x" data-saledel="${i}" aria-label="Verkauf löschen">×</button></div>`).join('')}</div>` : ''}
+      ${e.sales.length ? `<div class="sales">${e.sales.map((x, i) => `<div class="sale-line"><span>${x.inhalt ? 'Inhalt: ' : ''}${x.n}× ${eur(x.preis)} · Versand ${eur(x.versand || 0)} · ${x.tausch ? 'Tausch' + (x.gegen ? ' gegen ' + esc(x.gegen) : '') : x.direkt ? 'Direktverkauf' : esc(pfOf(x.pf).label)} · ${new Date(x.datum).toLocaleDateString('de-DE')}</span><b class="${clsOf(saleNetto(x))}">${eur(saleNetto(x))}</b><button class="x" data-saledel="${i}" aria-label="Verkauf löschen">×</button></div>`).join('')}</div>` : ''}
       ${e.typ !== 'sealed' ? lastSoldHtml(e, e.uid) : ''}
       ${gradeOf(e.note)?.company === 'PSA' || e.psaCert || e.psaEst != null ? psaHtml(e, e.vorschlag) : ''}
       <div class="grid2">
@@ -2737,7 +2964,9 @@ function bindBookForm(el) {
 function bindBookRows(el) {
   const find = (u) => book.find((x) => x.uid === u);
   const done = (msg) => { saveBook(); renderBook(); if (msg) toast(msg); };
+  $$('.book-row', el).forEach((row) => longPress(row, () => { if (!selMode) { selMode = true; bookOpen = null; } bookSel.add(row.dataset.uid); renderBook(); }));
   $$('.book-row', el).forEach((row) => row.addEventListener('click', (ev) => {
+    if (row.dataset.lp) { delete row.dataset.lp; return; }
     if (selMode) { const u = row.dataset.uid; bookSel.has(u) ? bookSel.delete(u) : bookSel.add(u); renderBook(); return; }
     if (ev.target.closest('.book-edit') || row.dataset.swiped) { delete row.dataset.swiped; return; }
     bookOpen = bookOpen === row.dataset.uid ? null : row.dataset.uid;
@@ -3498,7 +3727,7 @@ function initGrading() {
   renderLangSelect();
   initGrading();
   loadCart();
-  loadBook().then(() => scheduleRefresh(2500));
+  loadBook().then(() => { loadSell(); scheduleRefresh(2500); });
   loadScan();
   try { inventory = await db.all('inventory'); } catch { inventory = []; }
   refreshState.last = await kvGet('lastRefresh', null);
